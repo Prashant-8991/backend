@@ -4,15 +4,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from app.schemas.dashboardschema import CattleDashboardApiResponse
 from app.schemas.cattleprofileschema import CattleProfileApiResponse
+from app.schemas.presentcattleschema import PresentCattleModel
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List
 
 origins = [
     "http://localhost.tiangolo.com",
     "https://localhost.tiangolo.com",
     "http://localhost",
     "http://localhost:5173",
-    "http://10.83.29.77:5173"
+    "http://10.83.29.77:5173",
 ]
+
 app = FastAPI()
 
 app.add_middleware(
@@ -26,20 +29,44 @@ app.add_middleware(
 
 @app.get("/dashboard", response_model=CattleDashboardApiResponse)
 async def get_dashboard(session: AsyncSession = Depends(get_session)):
-    # 1. Execute the query
     result = await session.execute(text("SELECT get_dashboard_data()"))
-
-    # 2. Extract the actual JSON data from the SQLAlchemy Result object
     dashboard_data = result.scalar()
 
-    # 3. Return the extracted data
+    if dashboard_data is None:
+        raise HTTPException(status_code=404, detail="Dashboard data not found")
+
     return dashboard_data
 
 
 @app.get("/cattle/{tag_number}", response_model=CattleProfileApiResponse)
-async def get_cattle_profile(tag_number: str, session: AsyncSession = Depends(get_session)):
-    result = await session.execute(text("SELECT get_cattle_profile(:tag)"), {"tag": tag_number})
+async def get_cattle_profile(
+    tag_number: str,
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        text("SELECT get_cattle_profile(:tag)"),
+        {"tag": tag_number},
+    )
+
     profile_data = result.scalar()
+
     if profile_data is None:
         raise HTTPException(status_code=404, detail="Cattle not found")
+
     return profile_data
+
+
+@app.get("/all-present-cattle", response_model=List[PresentCattleModel])
+async def all_present_cattle(session: AsyncSession = Depends(get_session)):
+    result = await session.execute(text("SELECT * FROM get_all_present_cattle();"))
+    print(result)
+
+    cattle_list = result.scalar_one_or_none()
+    return cattle_list
+
+
+@app.get("/all-milking-cattle", response_model=List[PresentCattleModel])
+async def get_milking_cattle(session: AsyncSession = Depends(get_session)):
+    result = await session.execute(text("select * from get_all_milking_cattle();"))
+    milking_cattle = result.scalar_one_or_none()
+    return milking_cattle

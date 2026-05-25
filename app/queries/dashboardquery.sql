@@ -282,3 +282,54 @@ BEGIN
     RETURN tree_json;
 END;
 $$ LANGUAGE plpgsql;
+
+create or REPLACE FUNCTION get_all_present_cattle () returns JSON AS $$
+declare
+    json_data json;
+begin
+    select
+        json_agg(present_cattle)
+    from
+        (
+            select
+                tag_number,
+                name,
+                gender,
+                acquisition_type,
+                animal_type
+            from
+                cattle_data
+            where
+                new_is_currently_present = 1
+        ) as present_cattle into json_data;
+    return json_data;
+end;
+$$ language plpgsql;
+
+select * from get_all_present_cattle();
+
+create or REPLACE FUNCTION get_all_milking_cattle () returns JSON AS $$
+declare
+    json_data json;
+begin
+    select
+        json_agg(present_cattle)
+    from
+        (
+            select
+                tag_number,
+                name,
+                gender,
+                acquisition_type,
+                animal_type
+            from
+                cattle_data
+            where
+                new_is_currently_present = 1
+                and new_is_currenlty_milking = 1
+        ) as present_cattle into json_data;
+    return json_data;
+end;
+$$ language plpgsql;
+
+drop FUNCTION get_all_milking_cattle();
