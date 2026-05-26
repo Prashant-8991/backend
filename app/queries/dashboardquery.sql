@@ -261,6 +261,10 @@ begin
 end;
 $$ language plpgsql;
 
+-- select * from get_dashboard_data();
+
+-- drop function get_dashboard_data();
+
 -- ############################ cattle nested tree function #########################
 CREATE OR REPLACE FUNCTION get_nested_cattle_tree (target_tag TEXT) RETURNS JSON AS $$
 DECLARE
@@ -285,6 +289,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- drop function get_nested_cattle_tree();
 -- ########################## get all present cattle function ##########################
 create or REPLACE FUNCTION get_all_present_cattle () returns JSON AS $$
 declare
@@ -311,6 +316,7 @@ begin
 end;
 $$ language plpgsql;
 
+drop function get_all_present_cattle();
 -- ########################## get all milking cattle function ##########################
 create or REPLACE FUNCTION get_all_milking_cattle () returns JSON AS $$
 declare
@@ -337,6 +343,7 @@ begin
     return json_data;
 end;
 $$ language plpgsql;
+-- drop function get_all_milking_cattle();
 
 -- ########## cattle profile function ##########
 create or replace function get_cattle_profile (target_tag text) returns json as $$
@@ -487,6 +494,8 @@ begin
     return profile_json;
 end;
 $$ language plpgsql;
+
+-- drop function get_cattle_profile();
 
 -- ########## genealogy all cattle ##########
 create or replace function get_all_cattle_for_genealogy () returns json as $$
