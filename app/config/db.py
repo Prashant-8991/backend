@@ -3,7 +3,7 @@ from typing import AsyncGenerator
 
 # 1. Create the engine
 engine = create_async_engine(
-    "postgresql+asyncpg://postgres:postgres@localhost:5433/cattle", echo=True
+    "postgresql+asyncpg://postgres:postgres@localhost:5433/gaushala", echo=True
 )
 
 # 2. Create a session factory bound to the engine
@@ -24,4 +24,3 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         finally:
             print("======== session closed =======")
             await session.close()
-

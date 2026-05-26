@@ -1,3 +1,4 @@
+-- ############################ Dashboard Data Function #########################
 create or REPLACE FUNCTION get_dashboard_data () returns json as $$
 declare
    output_json json;
@@ -260,6 +261,7 @@ begin
 end;
 $$ language plpgsql;
 
+-- ############################ cattle nested tree function #########################
 CREATE OR REPLACE FUNCTION get_nested_cattle_tree (target_tag TEXT) RETURNS JSON AS $$
 DECLARE
     tree_json JSON;
@@ -283,6 +285,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- ########################## get all present cattle function ##########################
 create or REPLACE FUNCTION get_all_present_cattle () returns JSON AS $$
 declare
     json_data json;
@@ -296,7 +299,9 @@ begin
                 name,
                 gender,
                 acquisition_type,
-                animal_type
+                animal_type,
+                new_is_currenlty_milking as is_milking,
+                new_is_currently_pregnant as is_pregnant
             from
                 cattle_data
             where
@@ -306,8 +311,7 @@ begin
 end;
 $$ language plpgsql;
 
-select * from get_all_present_cattle();
-
+-- ########################## get all milking cattle function ##########################
 create or REPLACE FUNCTION get_all_milking_cattle () returns JSON AS $$
 declare
     json_data json;
@@ -321,7 +325,9 @@ begin
                 name,
                 gender,
                 acquisition_type,
-                animal_type
+                animal_type,
+                new_is_currenlty_milking as is_milking,
+                new_is_currently_pregnant as is_pregnant
             from
                 cattle_data
             where
@@ -332,4 +338,152 @@ begin
 end;
 $$ language plpgsql;
 
-drop FUNCTION get_all_milking_cattle();
+-- ########## cattle profile function ##########
+create or replace function get_cattle_profile (target_tag text) returns json as $$
+declare
+    profile_json json;
+begin
+    with recursive cattle_lineage as (
+        select
+            tag_number,
+            mother_tag_number,
+            father_tag_number,
+            name,
+            date_of_birth,
+            new_is_currently_present,
+            1 as generation_level
+        from cattle_data
+        where mother_tag_number is null and father_tag_number is null
+        union all
+        select
+            child.tag_number,
+            child.mother_tag_number,
+            child.father_tag_number,
+            child.name,
+            child.date_of_birth,
+            child.new_is_currently_present,
+            parent.generation_level + 1
+        from cattle_data child
+        inner join cattle_lineage parent on child.mother_tag_number = parent.tag_number
+    ),
+    overview_cte as (
+        select
+            cl.name,
+            cl.tag_number,
+            cl.generation_level as generation,
+            cl.date_of_birth,
+            cl.new_is_currently_present as is_present,
+            (select count(*) from cattle_data child where child.mother_tag_number = cl.tag_number) as total_number_of_children,
+            (select count(*) from cattle_data sibling where sibling.mother_tag_number = cl.mother_tag_number and sibling.tag_number != cl.tag_number) as total_number_of_siblings,
+            (select name from cattle_data where tag_number = cl.mother_tag_number) as mother_name,
+            (select name from cattle_data where tag_number = cl.father_tag_number) as father_name
+        from cattle_lineage cl
+        where cl.tag_number = target_tag
+    ),
+    children_cte as (
+        select
+            cl.name,
+            cl.tag_number,
+            cl.generation_level as generation,
+            cl.date_of_birth,
+            (select count(*) from cattle_data grandchild where grandchild.mother_tag_number = cl.tag_number) as total_number_of_children,
+            (select count(*) from cattle_data sibling where sibling.mother_tag_number = cl.mother_tag_number and sibling.tag_number != cl.tag_number) as total_number_of_siblings,
+            (select name from cattle_data where tag_number = cl.mother_tag_number) as mother_name,
+            (select name from cattle_data where tag_number = cl.father_tag_number) as father_name
+        from cattle_lineage cl
+        where cl.mother_tag_number = target_tag or cl.father_tag_number = target_tag
+    ),
+    physical_cte as (
+        select
+            hip_width,
+            head as head_score,
+            ear as ear_score,
+            eye as eye_score,
+            muzzle as muzzle_score,
+            horn as horn_score,
+            skin as skin_score,
+            tail as tail_score,
+            hump as hump_score,
+            udder as udder_score,
+            teat as teat_score,
+            dewlap as dewlap_score,
+            milk_vein as milk_vein_score
+        from cattle_physical_logs
+        where tag_number = target_tag
+        -- order by date desc
+        limit 1
+    ),
+    milk_cte as (
+        select
+            to_char(date, 'YYYY-MM') as month,
+            round(sum(milk)::numeric) as milk
+        from cattle_milk_logs
+        where tag_number = target_tag
+        group by to_char(date, 'YYYY-MM')
+        order by month asc
+    ),
+    siblings_cte as (
+        select
+            s.name,
+            s.tag_number,
+            s.date_of_birth
+        from cattle_data s
+        where s.mother_tag_number = (select mother_tag_number from cattle_data where tag_number = target_tag)
+          and s.tag_number != target_tag
+    ),
+    family_cte as (
+        select
+            (select name from cattle_data where tag_number = (select mother_tag_number from cattle_data where tag_number = target_tag)) as mother_name,
+            (select name from cattle_data where tag_number = (select father_tag_number from cattle_data where tag_number = target_tag)) as father_name,
+            (select name from cattle_data where tag_number = (select mother_tag_number from cattle_data where tag_number = (select mother_tag_number from cattle_data where tag_number = target_tag))) as grand_mother_name,
+            (select name from cattle_data where tag_number = (select father_tag_number from cattle_data where tag_number = (select mother_tag_number from cattle_data where tag_number = target_tag))) as grand_father_name
+    )
+    select json_build_object(
+        'overview', (
+            select json_build_object(
+                'name', o.name,
+                'tag_number', o.tag_number,
+                'generation', o.generation,
+                'date_of_birth', o.date_of_birth,
+                'is_present', o.is_present,
+                'total_number_of_children', o.total_number_of_children,
+                'total_number_of_siblings', o.total_number_of_siblings,
+                'mother_name', o.mother_name,
+                'father_name', o.father_name,
+                'children', coalesce((select json_agg(json_build_object(
+                    'name', c.name,
+                    'tag_number', c.tag_number,
+                    'generation', c.generation,
+                    'date_of_birth', c.date_of_birth,
+                    'total_number_of_children', c.total_number_of_children,
+                    'total_number_of_siblings', c.total_number_of_siblings,
+                    'mother_name', c.mother_name,
+                    'father_name', c.father_name
+                )) from children_cte c), '[]'::json),
+                'physical_data', (
+                    select row_to_json(p.*) from physical_cte p
+                )
+            ) from overview_cte o
+        ),
+        'milk_logs', coalesce((select json_agg(json_build_object(
+            'month', m.month,
+            'milk', m.milk
+        )) from milk_cte m), '[]'::json),
+        'family_tree', (
+            select json_build_object(
+                'mother_name', f.mother_name,
+                'father_name', f.father_name,
+                'grand_mother_name', f.grand_mother_name,
+                'grand_father_name', f.grand_father_name,
+                'siblings', coalesce((select json_agg(json_build_object(
+                    'name', s.name,
+                    'tag_number', s.tag_number,
+                    'date_of_birth', s.date_of_birth
+                )) from siblings_cte s), '[]'::json)
+            ) from family_cte f
+        )
+    ) into profile_json;
+
+    return profile_json;
+end;
+$$ language plpgsql;
