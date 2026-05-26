@@ -9,6 +9,7 @@ from app.schemas.cattleprofileschema import CattleProfileApiResponse
 from app.schemas.presentcattleschema import PresentCattleModel
 from app.schemas.genealogyschema import GenealogyCattle
 from app.schemas.donatedoutschema import DonatedOutRecord
+from app.schemas.cattlecardschema import CattleCardResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 
@@ -87,3 +88,20 @@ async def get_donated_out(session: AsyncSession = Depends(get_session)):
     result = await session.execute(text("SELECT get_donated_out_cattle()"))
     records = result.scalar_one_or_none()
     return records or []
+
+
+@app.get("/cattle-card/{tag_number}", response_model=CattleCardResponse)
+async def get_cattle_card(
+    tag_number: str,
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        text("SELECT get_cattle_card_data(:tag)"),
+        {"tag": tag_number},
+    )
+    card_data = result.scalar()
+
+    if card_data is None:
+        raise HTTPException(status_code=404, detail="Cattle not found")
+
+    return card_data
