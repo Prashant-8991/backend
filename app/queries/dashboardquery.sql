@@ -487,3 +487,44 @@ begin
     return profile_json;
 end;
 $$ language plpgsql;
+
+-- ########## genealogy all cattle ##########
+create or replace function get_all_cattle_for_genealogy () returns json as $$
+declare
+    json_data json;
+begin
+    with recursive cattle_lineage as (
+        select
+            cd.*,
+            1 as generation_level
+        from cattle_data cd
+        where cd.mother_tag_number is null
+        union all
+        select
+            child.*,
+            parent.generation_level + 1 as generation_level
+        from cattle_data child
+        inner join cattle_lineage parent on child.mother_tag_number = parent.tag_number
+    )
+    select
+        json_agg(genealogy_data)
+    from (
+        select
+            tag_number,
+            name,
+            gender,
+            animal_type,
+            acquisition_type,
+            date_of_birth::text as date_of_birth,
+            new_is_currently_present as is_present,
+            new_is_currenlty_milking as is_milking,
+            new_is_currently_pregnant as is_pregnant,
+            mother_tag_number,
+            father_tag_number,
+            generation_level as generation
+        from cattle_lineage
+        order by generation_level asc, name asc
+    ) as genealogy_data into json_data;
+    return json_data;
+end;
+$$ language plpgsql;

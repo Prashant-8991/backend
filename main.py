@@ -5,6 +5,7 @@ from sqlalchemy import text
 from app.schemas.dashboardschema import CattleDashboardApiResponse
 from app.schemas.cattleprofileschema import CattleProfileApiResponse
 from app.schemas.presentcattleschema import PresentCattleModel
+from app.schemas.genealogyschema import GenealogyCattle
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 
@@ -70,3 +71,12 @@ async def get_milking_cattle(session: AsyncSession = Depends(get_session)):
     result = await session.execute(text("select * from get_all_milking_cattle();"))
     milking_cattle = result.scalar_one_or_none()
     return milking_cattle
+
+
+@app.get("/genealogy/all", response_model=List[GenealogyCattle])
+async def get_genealogy_all(session: AsyncSession = Depends(get_session)):
+    result = await session.execute(
+        text("SELECT * FROM get_all_cattle_for_genealogy();")
+    )
+    cattle_list = result.scalar_one_or_none()
+    return cattle_list or []
