@@ -14,6 +14,17 @@ begin
             WHERE
                 new_is_currently_present = 1
         ),
+        'all_cattle_data',
+        (
+            select count(*) from cattle_data
+        ),
+        'total_bull', (
+            SELECT count(*) FROM cattle_data WHERE animal_type = 'BULL'
+        ),
+        'total_ox',
+        (
+            SELECT count(*) FROM cattle_data WHERE animal_type = 'OX'
+        ),
         'total_female_cattle',
         (
             SELECT
@@ -261,10 +272,12 @@ begin
 end;
 $$ language plpgsql;
 
--- select * from get_dashboard_data();
+select
+    *
+from
+    get_dashboard_data ();
 
 -- drop function get_dashboard_data();
-
 -- ############################ cattle nested tree function #########################
 CREATE OR REPLACE FUNCTION get_nested_cattle_tree (target_tag TEXT) RETURNS JSON AS $$
 DECLARE
@@ -316,7 +329,8 @@ begin
 end;
 $$ language plpgsql;
 
-drop function get_all_present_cattle();
+drop function get_all_present_cattle ();
+
 -- ########################## get all milking cattle function ##########################
 create or REPLACE FUNCTION get_all_milking_cattle () returns JSON AS $$
 declare
@@ -343,8 +357,8 @@ begin
     return json_data;
 end;
 $$ language plpgsql;
--- drop function get_all_milking_cattle();
 
+-- drop function get_all_milking_cattle();
 -- ########## cattle profile function ##########
 create or replace function get_cattle_profile (target_tag text) returns json as $$
 declare
@@ -496,7 +510,32 @@ end;
 $$ language plpgsql;
 
 -- drop function get_cattle_profile();
+-- ########## genealogy all cattle ##########
+-- ########################## get donated out cattle function ##########################
+create or replace function get_donated_out_cattle () returns json as $$
+declare
+    json_data json;
+begin
+    select
+        json_agg(donated)
+    from (
+        select
+            d.name,
+            d.tag_number,
+            d.donated_out_date,
+            d.donated_to,
+            d.mobile_number,
+            d.animal_type,
+            cd.gender
+        from donated_out d
+        left join cattle_data cd on cd.tag_number = d.tag_number
+        order by d.donated_out_date desc nulls last
+    ) as donated into json_data;
+    return json_data;
+end;
+$$ language plpgsql;
 
+-- drop function get_donated_out_cattle();
 -- ########## genealogy all cattle ##########
 create or replace function get_all_cattle_for_genealogy () returns json as $$
 declare

@@ -8,6 +8,7 @@ from app.schemas.dashboardschema import CattleDashboardApiResponse
 from app.schemas.cattleprofileschema import CattleProfileApiResponse
 from app.schemas.presentcattleschema import PresentCattleModel
 from app.schemas.genealogyschema import GenealogyCattle
+from app.schemas.donatedoutschema import DonatedOutRecord
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 
@@ -79,3 +80,10 @@ async def get_genealogy_all(session: AsyncSession = Depends(get_session)):
     )
     cattle_list = result.scalar_one_or_none()
     return cattle_list or []
+
+
+@app.get("/donations/donated-out", response_model=List[DonatedOutRecord])
+async def get_donated_out(session: AsyncSession = Depends(get_session)):
+    result = await session.execute(text("SELECT get_donated_out_cattle()"))
+    records = result.scalar_one_or_none()
+    return records or []

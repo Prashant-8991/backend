@@ -33,6 +33,9 @@ class MonthWiseMilkProduction(BaseModel):
 
 class CattleDashboardApiResponse(BaseModel):
     total_cattle: int | None
+    all_cattle_data: int | None
+    total_bull: int | None
+    total_ox: int | None
     total_female_cattle: int | None
     total_male_cattle: int | None
     total_female_calf: int | None
