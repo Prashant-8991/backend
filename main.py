@@ -1,3 +1,5 @@
+import os
+from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException
 from app.config.db import get_session
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,13 +11,10 @@ from app.schemas.genealogyschema import GenealogyCattle
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 
-origins = [
-    "http://localhost.tiangolo.com",
-    "https://localhost.tiangolo.com",
-    "http://localhost",
-    "http://localhost:5173",
-    "http://10.83.29.77:5173",
-]
+load_dotenv()
+
+origins_str = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+origins = [o.strip() for o in origins_str.split(",") if o.strip()]
 
 app = FastAPI()
 
