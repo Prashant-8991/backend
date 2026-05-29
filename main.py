@@ -4,7 +4,11 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from app.config.db import get_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_session
 from sqlalchemy import text
-from app.schemas.dashboardschema import CattleDashboardApiResponse, SpecificCattleMilkApiResponse
+from app.schemas.dashboardschema import (
+    CattleDashboardApiResponse,
+    MilkLogCreate,
+    SpecificCattleMilkApiResponse,
+)
 from app.schemas.cattleprofileschema import CattleProfileApiResponse
 from app.schemas.presentcattleschema import PresentCattleModel
 from app.schemas.genealogyschema import GenealogyCattle
@@ -147,14 +151,17 @@ async def get_cattle_card(
 
 @app.get("/cattle-milk/", response_model=list[SpecificCattleMilkApiResponse])
 async def get_cattle_milk(
-    tag_number: str, session: AsyncSession = Depends(get_session)
+    tag_number: str, year_month: str, session: AsyncSession = Depends(get_session)
 ):
     try:
         result = await session.execute(
             text("""
-                SELECT get_specific_cow_milk_data_for_current_month(:tag_number)
+                SELECT get_specific_cow_milk_data(
+                    :tag_number,
+                    :year_month
+                )
             """),
-            {"tag_number": tag_number},
+            {"tag_number": tag_number, "year_month": year_month},
         )
 
         data = result.scalar_one_or_none()
@@ -173,4 +180,38 @@ async def get_cattle_milk(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        )
+
+
+
+@app.post("/insert-milk-data/")
+async def create_cattle_milk_log(
+    payload: MilkLogCreate,
+    session: AsyncSession = Depends(get_session)
+):
+    try:
+        result = await session.execute(
+            text("""
+                SELECT insert_cattle_milk_log(
+                    :tag_number,
+                    :date,
+                    :milk
+                )
+            """),
+            {
+                "tag_number": payload.tag_number,
+                "date": payload.date,
+                "milk": payload.milk
+            }
+        )
+
+        await session.commit()
+
+        return result.scalar_one()
+
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
         )

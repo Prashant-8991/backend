@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from datetime import date
 
 
 class SourceBreakdown(BaseModel):
@@ -57,4 +58,11 @@ class CattleDashboardApiResponse(BaseModel):
 class SpecificCattleMilkApiResponse(BaseModel):
     tag_number: str
     date: str
+    milk: float
+
+
+
+class MilkLogCreate(BaseModel):
+    tag_number: str
+    date: date
     milk: float

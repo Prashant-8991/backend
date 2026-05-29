@@ -728,14 +728,24 @@ select
 from
     get_cattle_card_data ('SOM-052');
 
+
+
 CREATE OR REPLACE FUNCTION get_specific_cow_milk_data_for_current_month(
-    p_tag_number TEXT
+    p_tag_number TEXT,
+    p_year_month TEXT DEFAULT NULL
 )
 RETURNS JSON AS
 $$
 DECLARE
+    v_month_start DATE;
     json_data JSON;
 BEGIN
+    IF p_year_month IS NULL THEN
+        v_month_start := date_trunc('month', CURRENT_DATE)::DATE;
+    ELSE
+        v_month_start := to_date(p_year_month || '-01', 'YYYY-MM-DD');
+    END IF;
+
     SELECT json_agg(data)
     INTO json_data
     FROM (
@@ -745,16 +755,59 @@ BEGIN
             cml.milk
         FROM cattle_milk_logs cml
         WHERE cml.tag_number = p_tag_number
-          AND cml.date >= date_trunc('month', CURRENT_DATE)
-          AND cml.date < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
+          AND cml.date >= v_month_start
+          AND cml.date < v_month_start + INTERVAL '1 month'
         ORDER BY cml.date
     ) data;
 
-    RETURN json_data;
+    RETURN COALESCE(json_data, '[]'::json);
 END;
 $$ LANGUAGE plpgsql;
 
 
--- drop FUNCTION get_specific_cow_milk_data_for_current_month;
+drop FUNCTION get_specific_cow_milk_data_for_current_month;
 
-SELECT get_specific_cow_milk_data_for_current_month('SOM-052');
+SELECT get_specific_cow_milk_data_for_current_month('SOM-052', '2026-05');
+
+
+ALTER TABLE cattle_milk_logs
+ADD CONSTRAINT cattle_milk_logs_tag_date_unique
+UNIQUE (tag_number, date);
+
+
+
+CREATE OR REPLACE FUNCTION insert_cattle_milk_log(
+    p_tag_number TEXT,
+    p_date DATE,
+    p_milk FLOAT8
+)
+RETURNS JSON AS
+$$
+DECLARE
+    result JSON;
+BEGIN
+    INSERT INTO cattle_milk_logs (
+        tag_number,
+        date,
+        milk
+    )
+    VALUES (
+        p_tag_number,
+        p_date,
+        p_milk
+    )
+    ON CONFLICT (tag_number, date)
+    DO UPDATE
+    SET milk = EXCLUDED.milk;
+
+    result := json_build_object(
+        'success', true,
+        'message', 'Milk log saved successfully',
+        'tag_number', p_tag_number,
+        'date', p_date,
+        'milk', p_milk
+    );
+
+    RETURN result;
+END;
+$$ LANGUAGE plpgsql;
