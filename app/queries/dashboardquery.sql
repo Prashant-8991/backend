@@ -237,7 +237,23 @@ begin
                                 tag_number,
                                 hip_width,
                                 (
-                                    COALESCE(head, 0) + COALESCE(ear, 0) + COALESCE(eye, 0) + COALESCE(muzzle, 0) + COALESCE(horn, 0) + COALESCE(skin, 0) + COALESCE(tail, 0) + COALESCE(hump, 0) + COALESCE(udder, 0) + COALESCE(teat, 0) + COALESCE(dewlap, 0) + COALESCE(milk_vein, 0)
+                                    ROUND(
+                                        (
+                                            COALESCE(head, 0) +
+                                            COALESCE(ear, 0) +
+                                            COALESCE(eye, 0) +
+                                            COALESCE(muzzle, 0) +
+                                            COALESCE(horn, 0) +
+                                            COALESCE(skin, 0) +
+                                            COALESCE(tail, 0) +
+                                            COALESCE(hump, 0) +
+                                            COALESCE(udder, 0) +
+                                            COALESCE(teat, 0) +
+                                            COALESCE(dewlap, 0) +
+                                            COALESCE(milk_vein, 0)
+                                        )::numeric / 12,
+                                        3
+                                    )
                                 ) AS total_score
                             FROM
                                 cattle_physical_logs
@@ -264,6 +280,25 @@ begin
                 ORDER BY 
                     month ASC
             ) as monthwisemilk
+        ),
+        'average_milk_by_per_cattle', (
+            select
+            json_build_object(
+                'average_milk_by_per_cattle',
+                (round(avg(sub.average)))
+            )
+            from
+                (
+                    SELECT
+                        tag_number,
+                        round(AVG(milk)) as "average"
+                    from
+                        cattle_milk_logs
+                    GROUP BY
+                        tag_number
+                    order by
+                        average desc
+                ) as sub
         )
     ) into output_json;
 
@@ -271,6 +306,9 @@ begin
 
 end;
 $$ language plpgsql;
+
+drop FUNCTION get_dashboard_data;
+select * from get_dashboard_data();
 
 select
     *
@@ -682,5 +720,6 @@ begin
 end;
 $$ language plpgsql;
 
-
-select from get_cattle_card_data('SOM-052');
+select
+from
+    get_cattle_card_data ('SOM-052');

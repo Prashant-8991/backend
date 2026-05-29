@@ -26,6 +26,10 @@ class Top10Fitcattle(BaseModel):
     total_score: float | None = None
 
 
+class AverageMilkPerCattle(BaseModel):
+    average_milk_by_per_cattle: int
+
+
 class MonthWiseMilkProduction(BaseModel):
     month: str
     total_milk: float
@@ -47,3 +51,4 @@ class CattleDashboardApiResponse(BaseModel):
     top_10_milking_cattle: list[Top10Milkingcattle]
     top_10_fit_cattle: list[Top10Fitcattle]
     month_wise_milk_production: list[MonthWiseMilkProduction]
+    average_milk_by_per_cattle: AverageMilkPerCattle
