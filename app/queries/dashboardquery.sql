@@ -308,7 +308,11 @@ end;
 $$ language plpgsql;
 
 drop FUNCTION get_dashboard_data;
-select * from get_dashboard_data();
+
+select
+    *
+from
+    get_dashboard_data ();
 
 select
     *
@@ -723,3 +727,34 @@ $$ language plpgsql;
 select
 from
     get_cattle_card_data ('SOM-052');
+
+CREATE OR REPLACE FUNCTION get_specific_cow_milk_data_for_current_month(
+    p_tag_number TEXT
+)
+RETURNS JSON AS
+$$
+DECLARE
+    json_data JSON;
+BEGIN
+    SELECT json_agg(data)
+    INTO json_data
+    FROM (
+        SELECT
+            cml.tag_number,
+            cml.date,
+            cml.milk
+        FROM cattle_milk_logs cml
+        WHERE cml.tag_number = p_tag_number
+          AND cml.date >= date_trunc('month', CURRENT_DATE)
+          AND cml.date < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
+        ORDER BY cml.date
+    ) data;
+
+    RETURN json_data;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- drop FUNCTION get_specific_cow_milk_data_for_current_month;
+
+SELECT get_specific_cow_milk_data_for_current_month('SOM-052');

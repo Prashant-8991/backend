@@ -1,10 +1,10 @@
 import os
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, status
 from app.config.db import get_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_session
 from sqlalchemy import text
-from app.schemas.dashboardschema import CattleDashboardApiResponse
+from app.schemas.dashboardschema import CattleDashboardApiResponse, SpecificCattleMilkApiResponse
 from app.schemas.cattleprofileschema import CattleProfileApiResponse
 from app.schemas.presentcattleschema import PresentCattleModel
 from app.schemas.genealogyschema import GenealogyCattle
@@ -86,7 +86,9 @@ async def all_present_cattle():
         result = await session.execute(text("SELECT * FROM get_all_present_cattle();"))
         cattle_list = result.scalar_one_or_none()
         if cattle_list is None:
-            raise HTTPException(status_code=404, detail="All Present Cattle Data not avaialable error")
+            raise HTTPException(
+                status_code=404, detail="All Present Cattle Data not avaialable error"
+            )
         r.setex("all_present_cattle", 30, json.dumps(cattle_list))
         return cattle_list
 
@@ -141,3 +143,34 @@ async def get_cattle_card(
         raise HTTPException(status_code=404, detail="Cattle not found")
 
     return card_data
+
+
+@app.get("/cattle-milk/", response_model=list[SpecificCattleMilkApiResponse])
+async def get_cattle_milk(
+    tag_number: str, session: AsyncSession = Depends(get_session)
+):
+    try:
+        result = await session.execute(
+            text("""
+                SELECT get_specific_cow_milk_data_for_current_month(:tag_number)
+            """),
+            {"tag_number": tag_number},
+        )
+
+        data = result.scalar_one_or_none()
+
+        if data is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No milk data found for this cattle.",
+            )
+
+        return data
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        )

@@ -52,3 +52,9 @@ class CattleDashboardApiResponse(BaseModel):
     top_10_fit_cattle: list[Top10Fitcattle]
     month_wise_milk_production: list[MonthWiseMilkProduction]
     average_milk_by_per_cattle: AverageMilkPerCattle
+
+
+class SpecificCattleMilkApiResponse(BaseModel):
+    tag_number: str
+    date: str
+    milk: float
