@@ -66,3 +66,26 @@ class MilkLogCreate(BaseModel):
     tag_number: str
     date: date
     milk: float
+
+
+class CattleVaccineResponse(BaseModel):
+    tag_number: str
+    cattle_name: str
+    name: str
+    data: str
+    last_vaccination: date | None
+    next_date: date | None
+
+
+class VaccinationBatchItem(BaseModel):
+    tag_number: str
+    vaccine_id: int
+    vaccinated_on: date | None = None
+
+
+class VaccinationBatchResponse(BaseModel):
+    success: bool
+    total: int
+    saved: int
+    failed: int
+    errors: list[str]

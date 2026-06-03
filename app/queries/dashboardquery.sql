@@ -728,14 +728,7 @@ select
 from
     get_cattle_card_data ('SOM-052');
 
-
-
-CREATE OR REPLACE FUNCTION get_specific_cow_milk_data_for_current_month(
-    p_tag_number TEXT,
-    p_year_month TEXT DEFAULT NULL
-)
-RETURNS JSON AS
-$$
+CREATE OR REPLACE FUNCTION get_specific_cow_milk_data_for_current_month (p_tag_number TEXT, p_year_month TEXT DEFAULT NULL) RETURNS JSON AS $$
 DECLARE
     v_month_start DATE;
     json_data JSON;
@@ -764,25 +757,15 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-
 drop FUNCTION get_specific_cow_milk_data_for_current_month;
 
-SELECT get_specific_cow_milk_data_for_current_month('SOM-052', '2026-05');
-
+SELECT
+    get_specific_cow_milk_data_for_current_month ('SOM-052', '2026-05');
 
 ALTER TABLE cattle_milk_logs
-ADD CONSTRAINT cattle_milk_logs_tag_date_unique
-UNIQUE (tag_number, date);
+ADD CONSTRAINT cattle_milk_logs_tag_date_unique UNIQUE (tag_number, date);
 
-
-
-CREATE OR REPLACE FUNCTION insert_cattle_milk_log(
-    p_tag_number TEXT,
-    p_date DATE,
-    p_milk FLOAT8
-)
-RETURNS JSON AS
-$$
+CREATE OR REPLACE FUNCTION insert_cattle_milk_log (p_tag_number TEXT, p_date DATE, p_milk FLOAT8) RETURNS JSON AS $$
 DECLARE
     result JSON;
 BEGIN
@@ -809,5 +792,179 @@ BEGIN
     );
 
     RETURN result;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION cattle_vaccine () RETURNS json AS $$
+DECLARE
+    json_data json;
+    v_sixty_days_from_now DATE;
+BEGIN
+    v_sixty_days_from_now := CURRENT_DATE + 60;
+
+    WITH
+    latest_vaccinations AS (
+        SELECT DISTINCT ON (cvl.tag_number, cvl.vaccine_id)
+            cvl.tag_number,
+            cvl.vaccine_id,
+            cvl.vaccinated_on AS last_vaccination,
+            (cvl.vaccinated_on + v.booster_after_days::integer)::DATE AS next_date
+        FROM cattle_vaccine_logs cvl
+        JOIN vaccine v ON v.id = cvl.vaccine_id
+        ORDER BY cvl.tag_number, cvl.vaccine_id, cvl.vaccinated_on DESC
+    ),
+    vaccine_master AS (
+        SELECT id, COALESCE(full_name, name) AS name, booster_after_days 
+        FROM vaccine 
+        WHERE id IN (1, 2)
+    ),
+    all_cattle_vaccines AS (
+        SELECT
+            cd.tag_number,
+            cd.name AS cattle_name,
+            vm.id AS vaccine_id,
+            vm.name,
+            vm.booster_after_days,
+            lv.last_vaccination,
+            COALESCE(lv.next_date, CURRENT_DATE) AS next_date
+        FROM cattle_data cd
+        CROSS JOIN vaccine_master vm
+        LEFT JOIN latest_vaccinations lv ON lv.tag_number = cd.tag_number AND lv.vaccine_id = vm.id
+        WHERE cd.new_is_currently_present = 1
+    ),
+    vaccine_1_and_2 AS (
+        SELECT
+            tag_number,
+            cattle_name,
+            name,
+            last_vaccination,
+            next_date,
+            CASE
+                WHEN last_vaccination IS NULL THEN 'Pending'
+                WHEN next_date < CURRENT_DATE THEN 'overdue'
+                WHEN next_date <= v_sixty_days_from_now THEN 'Pending'
+                ELSE 'Pending'
+            END AS data
+        FROM all_cattle_vaccines
+        WHERE last_vaccination IS NULL
+           OR next_date < CURRENT_DATE
+           OR next_date <= v_sixty_days_from_now
+    ),
+    ),
+    vaccine_3 AS (
+        SELECT
+            cd.tag_number,
+            cd.name AS cattle_name,
+            COALESCE(v.full_name, v.name) AS name,
+            NULL::date AS last_vaccination,
+            NULL::date AS next_date,
+            'Pending'::text AS data
+        FROM cattle_data cd
+        CROSS JOIN vaccine v
+        WHERE cd.new_is_currently_present = 1
+          AND v.id = 3
+          AND LOWER(cd.gender) = 'female'
+          AND age(NULLIF(cd.date_of_birth, '-')::date) BETWEEN INTERVAL '4 months' AND INTERVAL '8 months'
+          AND cd.brucellosis_status = 'UNKNOWN'
+    )
+    SELECT json_agg(row_to_json(combined_data)) INTO json_data
+    FROM (
+        SELECT tag_number, cattle_name, name, last_vaccination, next_date, data
+        FROM vaccine_1_and_2
+        WHERE data IS NOT NULL
+        UNION ALL
+        SELECT tag_number, cattle_name, name, last_vaccination, next_date, data
+        FROM vaccine_3
+    ) AS combined_data;
+
+    RETURN json_data;
+END;
+$$ LANGUAGE plpgsql;
+
+select
+    *
+from
+    cattle_vaccine ();
+
+
+-- ============================================================
+-- BATCH VACCINATION: insert into cattle_vaccine_logs
+-- For vaccine_id=3 (Brucellosis), also updates cattle_data
+-- ============================================================
+CREATE OR REPLACE FUNCTION insert_cattle_vaccine_batch(
+    p_tag_number TEXT,
+    p_vaccine_id BIGINT,
+    p_vaccinated_on DATE DEFAULT CURRENT_DATE
+) RETURNS JSON AS $$
+DECLARE
+    v_id INTEGER;
+    v_result JSON;
+    v_updated BOOLEAN := false;
+BEGIN
+    INSERT INTO cattle_vaccine_logs (tag_number, vaccine_id, vaccinated_on)
+    VALUES (p_tag_number, p_vaccine_id, p_vaccinated_on)
+    RETURNING id INTO v_id;
+
+    IF p_vaccine_id = 3 THEN
+        UPDATE cattle_data
+        SET brucellosis_status = 'VACCINATED'
+        WHERE tag_number = p_tag_number;
+        v_updated := true;
+    END IF;
+
+    v_result := json_build_object(
+        'success', true,
+        'message', 'Vaccination saved',
+        'id', v_id,
+        'tag_number', p_tag_number,
+        'vaccine_id', p_vaccine_id,
+        'vaccinated_on', p_vaccinated_on,
+        'cattle_data_updated', v_updated
+    );
+    RETURN v_result;
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE OR REPLACE FUNCTION insert_cattle_vaccine_batch_multi(
+    p_records JSON
+) RETURNS JSON AS $$
+DECLARE
+    v_record RECORD;
+    v_results JSONB := '[]'::JSONB;
+    v_success INTEGER := 0;
+    v_failed INTEGER := 0;
+    v_errors TEXT[] := '{}';
+BEGIN
+    FOR v_record IN
+        SELECT * FROM json_populate_recordset(null::record, p_records)
+        AS (tag_number TEXT, vaccine_id BIGINT, vaccinated_on DATE)
+    LOOP
+        BEGIN
+            INSERT INTO cattle_vaccine_logs (tag_number, vaccine_id, vaccinated_on)
+            VALUES (v_record.tag_number, v_record.vaccine_id,
+                    COALESCE(v_record.vaccinated_on, CURRENT_DATE));
+
+            IF v_record.vaccine_id = 3 THEN
+                UPDATE cattle_data
+                SET brucellosis_status = 'VACCINATED'
+                WHERE tag_number = v_record.tag_number;
+            END IF;
+
+            v_success := v_success + 1;
+        EXCEPTION WHEN OTHERS THEN
+            v_failed := v_failed + 1;
+            v_errors := array_append(v_errors,
+                v_record.tag_number || ':' || SQLERRM);
+        END;
+    END LOOP;
+
+    RETURN json_build_object(
+        'success', true,
+        'total', v_success + v_failed,
+        'saved', v_success,
+        'failed', v_failed,
+        'errors', v_errors
+    );
 END;
 $$ LANGUAGE plpgsql;

@@ -6,8 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_session
 from sqlalchemy import text
 from app.schemas.dashboardschema import (
     CattleDashboardApiResponse,
+    CattleVaccineResponse,
     MilkLogCreate,
     SpecificCattleMilkApiResponse,
+    VaccinationBatchItem,
+    VaccinationBatchResponse,
 )
 from app.schemas.cattleprofileschema import CattleProfileApiResponse
 from app.schemas.presentcattleschema import PresentCattleModel
@@ -183,11 +186,9 @@ async def get_cattle_milk(
         )
 
 
-
 @app.post("/insert-milk-data/")
 async def create_cattle_milk_log(
-    payload: MilkLogCreate,
-    session: AsyncSession = Depends(get_session)
+    payload: MilkLogCreate, session: AsyncSession = Depends(get_session)
 ):
     try:
         result = await session.execute(
@@ -201,8 +202,8 @@ async def create_cattle_milk_log(
             {
                 "tag_number": payload.tag_number,
                 "date": payload.date,
-                "milk": payload.milk
-            }
+                "milk": payload.milk,
+            },
         )
 
         await session.commit()
@@ -212,6 +213,40 @@ async def create_cattle_milk_log(
     except Exception as e:
         await session.rollback()
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        )
+
+
+@app.get("/cattle_vaccine", response_model=list[CattleVaccineResponse])
+async def get_cattle_vaccine(session: AsyncSession = Depends(get_session)):
+    try:
+        result = await session.execute(text("""
+                select cattle_vaccine();
+            """))
+        return result.scalar_one_or_none()
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        )
+
+
+@app.post("/vaccination-batch", response_model=VaccinationBatchResponse)
+async def create_vaccination_batch(
+    payload: list[VaccinationBatchItem],
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        records_json = json.dumps([r.model_dump(mode="json") for r in payload])
+        result = await session.execute(
+            text("SELECT insert_cattle_vaccine_batch_multi(:p_records)"),
+            {"p_records": records_json},
+        )
+        data = result.scalar()
+        await session.commit()
+        return data
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
         )
