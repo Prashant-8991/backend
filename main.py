@@ -231,6 +231,26 @@ async def get_cattle_vaccine(session: AsyncSession = Depends(get_session)):
         )
 
 
+@app.put("/vaccination/brucellosis/{tag_number}")
+async def vaccinate_brucellosis(
+    tag_number: str,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        result = await session.execute(
+            text("SELECT vaccinate_brucellosis(:tag)"),
+            {"tag": tag_number},
+        )
+        data = result.scalar()
+        await session.commit()
+        return data
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        )
+
+
 @app.post("/vaccination-batch", response_model=VaccinationBatchResponse)
 async def create_vaccination_batch(
     payload: list[VaccinationBatchItem],

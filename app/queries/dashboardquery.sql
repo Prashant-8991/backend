@@ -864,8 +864,7 @@ BEGIN
         WHERE cd.new_is_currently_present = 1
           AND v.id = 3
           AND LOWER(cd.gender) = 'female'
-          AND age(NULLIF(cd.date_of_birth, '-')::date) BETWEEN INTERVAL '4 months' AND INTERVAL '8 months'
-          AND cd.brucellosis_status = 'UNKNOWN'
+          AND (cd.brucellosis_status = 'NOT_VACCINATED' OR cd.brucellosis_status = 'UNKNOWN')
     )
     SELECT json_agg(row_to_json(combined_data)) INTO json_data
     FROM (
@@ -885,6 +884,36 @@ select
     *
 from
     cattle_vaccine ();
+
+
+-- ============================================================
+-- BRUCELLOSIS: only updates cattle_data.brucellosis_status
+-- No insert into cattle_vaccine_logs
+-- ============================================================
+CREATE OR REPLACE FUNCTION vaccinate_brucellosis(
+    p_tag_number TEXT
+) RETURNS JSON AS $$
+DECLARE
+    v_result JSON;
+BEGIN
+    UPDATE cattle_data
+    SET brucellosis_status = 'VACCINATED'
+    WHERE tag_number = p_tag_number
+      AND brucellosis_status = 'NOT_VACCINATED';
+
+    GET DIAGNOSTICS v_result = ROW_COUNT;
+
+    IF v_result = 0 THEN
+        RETURN json_build_object('success', false, 'message', 'Cattle not found or already vaccinated');
+    END IF;
+
+    RETURN json_build_object(
+        'success', true,
+        'message', 'Brucellosis vaccination recorded',
+        'tag_number', p_tag_number
+    );
+END;
+$$ LANGUAGE plpgsql;
 
 
 -- ============================================================
