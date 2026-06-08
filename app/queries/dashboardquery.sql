@@ -639,6 +639,113 @@ end;
 $$ language plpgsql;
 
 -- ########## cattle card data function ##########
+-- create or replace function get_cattle_card_data (target_tag text) returns json as $$
+-- declare
+--     result_json json;
+-- begin
+--     with recursive cattle_lineage as (
+--         select
+--             cd.id, cd.name, cd.tag_number, cd.acquisition_type,
+--             cd.date_of_birth, cd.animal_type, cd.mother_name,
+--             cd.mother_tag_number, cd.father_name, cd.father_tag_number,
+--             cd.new_is_currently_present, cd.new_is_currently_pregnant,
+--             cd.new_is_currenlty_milking, cd.weight_at_birth, cd.gender,
+--             1::int as generation_level
+--         from cattle_data cd
+--         where cd.mother_tag_number is null and cd.father_tag_number is null
+--         union all
+--         select
+--             child.id, child.name, child.tag_number, child.acquisition_type,
+--             child.date_of_birth, child.animal_type, child.mother_name,
+--             child.mother_tag_number, child.father_name, child.father_tag_number,
+--             child.new_is_currently_present, child.new_is_currently_pregnant,
+--             child.new_is_currenlty_milking, child.weight_at_birth, child.gender,
+--             (parent.generation_level + 1)::int as generation_level
+--         from cattle_data child
+--         inner join cattle_lineage parent on child.mother_tag_number = parent.tag_number
+--     ),
+--     me as (
+--         select * from cattle_lineage where tag_number = target_tag
+--     ),
+--     phys as (
+--         select * from cattle_physical_logs where tag_number = target_tag order by id desc limit 1
+--     )
+--     select json_build_object(
+--         'overview', json_build_object(
+--             'name', me.name,
+--             'tag_number', me.tag_number,
+--             'physical_score', (select round((coalesce(head::numeric,0)+coalesce(ear::numeric,0)+coalesce(eye::numeric,0)+coalesce(muzzle::numeric,0)+coalesce(horn::numeric,0)+coalesce(skin::numeric,0)+coalesce(tail::numeric,0)+coalesce(hump::numeric,0)+coalesce(udder::numeric,0)+coalesce(teat::numeric,0)+coalesce(dewlap::numeric,0)+coalesce(milk_vein::numeric,0))/12.0, 1) from phys),
+--             'average_physical_score', (select round((coalesce(avg(head)::numeric,0)+coalesce(avg(ear)::numeric,0)+coalesce(avg(eye)::numeric,0)+coalesce(avg(muzzle)::numeric,0)+coalesce(avg(horn)::numeric,0)+coalesce(avg(skin)::numeric,0)+coalesce(avg(tail)::numeric,0)+coalesce(avg(hump)::numeric,0)+coalesce(avg(udder)::numeric,0)+coalesce(avg(teat)::numeric,0)+coalesce(avg(dewlap)::numeric,0)+coalesce(avg(milk_vein)::numeric,0))/12.0, 1) from cattle_physical_logs),
+--             'acquisition_type', coalesce(me.acquisition_type, 'Not available'),
+--             'generation', coalesce(me.generation_level::text, 'Not available'),
+--             'DOB', coalesce(me.date_of_birth, 'Not available'),
+--             'total_childrens', (select count(*) from cattle_data where mother_tag_number = target_tag),
+--             'siblings', coalesce((select json_agg(json_build_object('name', sib.name, 'tag_number', sib.tag_number, 'generation', sib.generation_level)) from cattle_lineage sib where sib.mother_tag_number = me.mother_tag_number and sib.tag_number != target_tag), '[]'::json),
+--             'is_present', me.new_is_currently_present,
+--             'lactation_cycle', case
+--                 when me.new_is_currenlty_milking = 1 then 'Lactating'
+--                 when me.new_is_currently_pregnant = 1 then 'Pregnant'
+--                 when (select birth_date from cattle_pragnancies_logs where tag_number = target_tag and birth_date is not null order by birth_date desc limit 1) is not null then 'Post-lactation'
+--                 else 'Not available'
+--             end,
+--             'last_calving_date', coalesce((select birth_date from cattle_pragnancies_logs where tag_number = target_tag and birth_date is not null order by birth_date desc limit 1), 'Not available'),
+--             'mother', case when me.mother_tag_number is not null and (select name from cattle_lineage where tag_number = me.mother_tag_number) is not null then (select json_build_object('name', m.name, 'tag_number', m.tag_number, 'generation', m.generation_level) from cattle_lineage m where m.tag_number = me.mother_tag_number) else to_json('Not available'::text) end,
+--             'father', case when me.father_tag_number is not null and (select name from cattle_lineage where tag_number = me.father_tag_number) is not null then (select json_build_object('name', f.name, 'tag_number', f.tag_number, 'generation', f.generation_level) from cattle_lineage f where f.tag_number = me.father_tag_number) else to_json('Not available'::text) end,
+--             'childrens', coalesce((select json_agg(json_build_object('name', c.name, 'tag_number', c.tag_number, 'generation', c.generation_level)) from cattle_lineage c where c.mother_tag_number = target_tag), '[]'::json),
+--             'breed_score', json_build_object(
+--                 'hip_width', coalesce((select hip_width from phys), '0'),
+--                 'head', coalesce((select head::text from phys), '0'),
+--                 'ear', coalesce((select ear::text from phys), '0'),
+--                 'eye', coalesce((select eye::text from phys), '0'),
+--                 'muzzle', coalesce((select muzzle::text from phys), '0'),
+--                 'horn', coalesce((select horn::text from phys), '0'),
+--                 'skin', coalesce((select skin::text from phys), '0'),
+--                 'tail', coalesce((select tail::text from phys), '0'),
+--                 'hump', coalesce((select hump::text from phys), '0'),
+--                 'udder', coalesce((select udder::text from phys), '0'),
+--                 'teat', coalesce((select teat::text from phys), '0'),
+--                 'dewlap', coalesce((select dewlap::text from phys), '0'),
+--                 'milk_vein', coalesce((select milk_vein::text from phys), '0')
+--             ),
+--             'weight', case when me.weight_at_birth is not null then me.weight_at_birth::text else 'Not available' end,
+--             'age', case
+--                 when me.date_of_birth is not null and me.date_of_birth ~ '^\d{4}-\d{2}-\d{2}' then
+--                     extract(year from age(now(), me.date_of_birth::date))::text || ' years'
+--                 else 'Not available'
+--             end,
+--             'average_milk_per_day', case when me.new_is_currenlty_milking = 1 then (select round(avg(milk)::numeric, 1) from cattle_milk_logs where tag_number = target_tag) else null end
+--         ),
+--         'milk_by_month', case when me.new_is_currenlty_milking = 1
+--             then coalesce((select json_agg(json_build_object('date', month_group, 'milk', total_milk)) from (
+--                 select to_char(date::timestamp, 'YYYY-MM') as month_group, round(sum(milk)::numeric, 1) as total_milk
+--                 from cattle_milk_logs where tag_number = target_tag
+--                 group by to_char(date::timestamp, 'YYYY-MM')
+--                 order by month_group
+--             ) sub), '[]'::json)
+--             else '[]'::json
+--         end,
+--         'milk_by_day_only_for_month', case when me.new_is_currenlty_milking = 1
+--             then coalesce((select json_agg(json_build_object('date', milk_date, 'milk', round(milk::numeric, 1))) from (
+--                 select date as milk_date, milk from cattle_milk_logs where tag_number = target_tag order by milk_date desc limit 30
+--             ) sub), '[]'::json)
+--             else '[]'::json
+--         end,
+--         'family', json_build_object(
+--             'mother', (select case when m.name is not null then json_build_object('name', m.name, 'tag_number', m.tag_number, 'generation', m.generation_level) else null::json end from cattle_lineage m where m.tag_number = me.mother_tag_number),
+--             'father', (select case when f.name is not null then json_build_object('name', f.name, 'tag_number', f.tag_number, 'generation', f.generation_level) else null::json end from cattle_lineage f where f.tag_number = me.father_tag_number),
+--             'siblings', coalesce((select json_agg(json_build_object('name', sib.name, 'tag_number', sib.tag_number, 'generation', sib.generation_level)) from cattle_lineage sib where sib.mother_tag_number = me.mother_tag_number and sib.tag_number != target_tag), '[]'::json),
+--             'childrens', coalesce((select json_agg(json_build_object('name', c.name, 'tag_number', c.tag_number, 'generation', c.generation_level)) from cattle_lineage c where c.mother_tag_number = target_tag), '[]'::json)
+--         )
+--     ) into result_json
+--     from me;
+
+--     return result_json;
+-- end;
+-- $$ language plpgsql;
+
+
+
+
 create or replace function get_cattle_card_data (target_tag text) returns json as $$
 declare
     result_json json;
@@ -669,7 +776,38 @@ begin
     ),
     phys as (
         select * from cattle_physical_logs where tag_number = target_tag order by id desc limit 1
+    ),
+    -- --- NEW CTEs: Pregnancy & Calving Interval Calculations ---
+    cleaned_dates as (
+        select 
+            id,
+            tag_number,
+            case when conception_date in ('1900-01-00', '-', '') then null else conception_date end::timestamp as safe_conception_date,
+            case when birth_date in ('1900-01-00', '-', '') then null else birth_date end::timestamp as safe_birth_date
+        from cattle_pragnancies_logs
+        where tag_number = target_tag
+    ),
+    previous_births as (
+        select 
+            id,
+            safe_conception_date,
+            safe_birth_date,
+            lag(safe_birth_date) over (order by safe_birth_date) as previous_birth_date
+        from cleaned_dates
+    ),
+    pregnancy_stats as (
+        select
+            id,
+            safe_conception_date as conception_date,
+            safe_birth_date as birth_date,
+            -- Casting interval to text ensures clean JSON serialization
+            age(safe_birth_date, safe_conception_date)::text as gestation_period,
+            age(safe_birth_date, previous_birth_date)::text as calving_interval
+        from previous_births
+        order by safe_birth_date desc
     )
+    -- --- END NEW CTEs ---
+    
     select json_build_object(
         'overview', json_build_object(
             'name', me.name,
@@ -735,7 +873,21 @@ begin
             'father', (select case when f.name is not null then json_build_object('name', f.name, 'tag_number', f.tag_number, 'generation', f.generation_level) else null::json end from cattle_lineage f where f.tag_number = me.father_tag_number),
             'siblings', coalesce((select json_agg(json_build_object('name', sib.name, 'tag_number', sib.tag_number, 'generation', sib.generation_level)) from cattle_lineage sib where sib.mother_tag_number = me.mother_tag_number and sib.tag_number != target_tag), '[]'::json),
             'childrens', coalesce((select json_agg(json_build_object('name', c.name, 'tag_number', c.tag_number, 'generation', c.generation_level)) from cattle_lineage c where c.mother_tag_number = target_tag), '[]'::json)
-        )
+        ),
+        
+        -- --- NEW JSON KEY: pregnancy_logs ---
+        'pregnancy_logs', coalesce((
+            select json_agg(json_build_object(
+                'id', p.id,
+                'conception_date', p.conception_date,
+                'birth_date', p.birth_date,
+                'gestation_period', p.gestation_period,
+                'calving_interval', p.calving_interval
+            ))
+            from pregnancy_stats p
+        ), '[]'::json)
+        -- --- END NEW JSON KEY ---
+        
     ) into result_json
     from me;
 
@@ -743,7 +895,7 @@ begin
 end;
 $$ language plpgsql;
 
-select
+select *
 from
     get_cattle_card_data ('SOM-052');
 

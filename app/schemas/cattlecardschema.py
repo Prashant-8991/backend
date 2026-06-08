@@ -1,6 +1,14 @@
 from pydantic import BaseModel
 from typing import Any
+from datetime import datetime
 
+
+class CattlePregnancyLogsResponse(BaseModel):
+    id: int
+    conception_date: str | None
+    birth_date: str | None
+    gestation_period: str | None
+    calving_interval: str | None
 
 class SiblingInfo(BaseModel):
     name: str | None = None
@@ -69,3 +77,4 @@ class CattleCardResponse(BaseModel):
     milk_by_month: list[MilkRecord] = []
     milk_by_day_only_for_month: list[MilkRecord] = []
     family: FamilyInfo | None = None
+    pregnancy_logs: list[CattlePregnancyLogsResponse]
