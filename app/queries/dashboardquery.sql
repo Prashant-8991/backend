@@ -553,26 +553,45 @@ $$ language plpgsql;
 
 -- drop function get_cattle_profile();
 -- ########## genealogy all cattle ##########
--- ########################## get donated out cattle function ##########################
-create or replace function get_donated_out_cattle () returns json as $$
+-- ########################## get donated cattle function (incoming + outgoing) ##########################
+create or replace function get_donated_cattle () returns json as $$
 declare
     json_data json;
 begin
     select
-        json_agg(donated)
+        json_agg(sub) into json_data
     from (
-        select
-            d.name,
-            d.tag_number,
-            d.donated_out_date,
-            d.donated_to,
-            d.mobile_number,
-            d.animal_type,
-            cd.gender
-        from donated_out d
-        left join cattle_data cd on cd.tag_number = d.tag_number
-        order by d.donated_out_date desc nulls last
-    ) as donated into json_data;
+        with
+            donated_out_cte as (
+                select
+                    name,
+                    tag_number,
+                    donated_out_date::text as donated_date,
+                    donated_to as donated,
+                    mobile_number,
+                    gender,
+                    'outgoing' as out_type
+                from donated_out
+            ),
+            donated_in_cte as (
+                select distinct on (tag_number)
+                    name,
+                    tag_number,
+                    donated_in_date::text as donated_date,
+                    from_donated_in as donated,
+                    '' as mobile_number,
+                    gender,
+                    'incoming' as out_type
+                from donated_in
+                order by tag_number, donated_in_date desc nulls last
+            )
+        select *
+        from donated_out_cte
+        union all
+        select *
+        from donated_in_cte
+        order by donated_date desc nulls last
+    ) as sub;
     return json_data;
 end;
 $$ language plpgsql;
@@ -795,29 +814,130 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION cattle_vaccine () RETURNS json AS $$
+-- CREATE OR REPLACE FUNCTION cattle_vaccine () RETURNS json AS $$
+-- DECLARE
+--     json_data json;
+--     v_sixty_days_from_now DATE;
+-- BEGIN
+--     v_sixty_days_from_now := CURRENT_DATE + 60;
+
+--     WITH
+--     latest_vaccinations AS (
+--         SELECT DISTINCT ON (cvl.tag_number, cvl.vaccine_id)
+--             cvl.tag_number,
+--             cvl.vaccine_id,
+--             cvl.vaccinated_on AS last_vaccination,
+--             (cvl.vaccinated_on + v.booster_after_days::integer)::DATE AS next_date
+--         FROM cattle_vaccine_logs cvl
+--         JOIN vaccine v ON v.id = cvl.vaccine_id
+--         ORDER BY cvl.tag_number, cvl.vaccine_id, cvl.vaccinated_on DESC
+--     ),
+--     vaccine_master AS (
+--         SELECT id, COALESCE(full_name, name) AS name, booster_after_days 
+--         FROM vaccine 
+--         WHERE id IN (1, 2)
+--     ),
+--     all_cattle_vaccines AS (
+--         SELECT
+--             cd.tag_number,
+--             cd.name AS cattle_name,
+--             vm.id AS vaccine_id,
+--             vm.name,
+--             vm.booster_after_days,
+--             lv.last_vaccination,
+--             COALESCE(lv.next_date, CURRENT_DATE) AS next_date
+--         FROM cattle_data cd
+--         CROSS JOIN vaccine_master vm
+--         LEFT JOIN latest_vaccinations lv ON lv.tag_number = cd.tag_number AND lv.vaccine_id = vm.id
+--         WHERE cd.new_is_currently_present = 1
+--     ),
+--     vaccine_1_and_2 AS (
+--         SELECT
+--             tag_number,
+--             cattle_name,
+--             name,
+--             last_vaccination,
+--             next_date,
+--             CASE
+--                 WHEN last_vaccination IS NULL THEN 'Pending'
+--                 WHEN next_date < CURRENT_DATE THEN 'overdue'
+--                 WHEN next_date <= v_sixty_days_from_now THEN 'Pending'
+--                 ELSE 'Pending'
+--             END AS data
+--         FROM all_cattle_vaccines
+--         WHERE last_vaccination IS NULL
+--            OR next_date < CURRENT_DATE
+--            OR next_date <= v_sixty_days_from_now
+--     ),
+--     ),
+--     vaccine_3 AS (
+--         SELECT
+--             cd.tag_number,
+--             cd.name AS cattle_name,
+--             COALESCE(v.full_name, v.name) AS name,
+--             NULL::date AS last_vaccination,
+--             NULL::date AS next_date,
+--             'Pending'::text AS data
+--         FROM cattle_data cd
+--         CROSS JOIN vaccine v
+--         WHERE cd.new_is_currently_present = 1
+--           AND v.id = 3
+--           AND LOWER(cd.gender) = 'female'
+--           AND (cd.brucellosis_status = 'NOT_VACCINATED' OR cd.brucellosis_status = 'UNKNOWN')
+--     )
+--     SELECT json_agg(row_to_json(combined_data)) INTO json_data
+--     FROM (
+--         SELECT tag_number, cattle_name, name, last_vaccination, next_date, data
+--         FROM vaccine_1_and_2
+--         WHERE data IS NOT NULL
+--         UNION ALL
+--         SELECT tag_number, cattle_name, name, last_vaccination, next_date, data
+--         FROM vaccine_3
+--     ) AS combined_data;
+
+--     RETURN json_data;
+-- END;
+-- $$ LANGUAGE plpgsql;
+
+
+
+
+CREATE OR REPLACE FUNCTION cattle_vaccine()
+RETURNS json
+AS $$
 DECLARE
     json_data json;
     v_sixty_days_from_now DATE;
 BEGIN
     v_sixty_days_from_now := CURRENT_DATE + 60;
 
-    WITH
-    latest_vaccinations AS (
+    WITH latest_vaccinations AS (
         SELECT DISTINCT ON (cvl.tag_number, cvl.vaccine_id)
             cvl.tag_number,
             cvl.vaccine_id,
             cvl.vaccinated_on AS last_vaccination,
-            (cvl.vaccinated_on + v.booster_after_days::integer)::DATE AS next_date
+            (
+                cvl.vaccinated_on +
+                v.booster_after_days::integer
+            )::DATE AS next_date
         FROM cattle_vaccine_logs cvl
-        JOIN vaccine v ON v.id = cvl.vaccine_id
-        ORDER BY cvl.tag_number, cvl.vaccine_id, cvl.vaccinated_on DESC
+        JOIN vaccine v
+            ON v.id = cvl.vaccine_id
+        ORDER BY
+            cvl.tag_number,
+            cvl.vaccine_id,
+            cvl.vaccinated_on DESC
     ),
+
     vaccine_master AS (
-        SELECT id, COALESCE(full_name, name) AS name, booster_after_days 
-        FROM vaccine 
+        SELECT
+            id,
+            COALESCE(full_name, name) AS name,
+            booster_after_days
+        FROM vaccine
         WHERE id IN (1, 2)
     ),
+
     all_cattle_vaccines AS (
         SELECT
             cd.tag_number,
@@ -829,9 +949,12 @@ BEGIN
             COALESCE(lv.next_date, CURRENT_DATE) AS next_date
         FROM cattle_data cd
         CROSS JOIN vaccine_master vm
-        LEFT JOIN latest_vaccinations lv ON lv.tag_number = cd.tag_number AND lv.vaccine_id = vm.id
+        LEFT JOIN latest_vaccinations lv
+            ON lv.tag_number = cd.tag_number
+           AND lv.vaccine_id = vm.id
         WHERE cd.new_is_currently_present = 1
     ),
+
     vaccine_1_and_2 AS (
         SELECT
             tag_number,
@@ -841,42 +964,63 @@ BEGIN
             next_date,
             CASE
                 WHEN last_vaccination IS NULL THEN 'Pending'
-                WHEN next_date < CURRENT_DATE THEN 'overdue'
+                WHEN next_date < CURRENT_DATE THEN 'Overdue'
                 WHEN next_date <= v_sixty_days_from_now THEN 'Pending'
-                ELSE 'Pending'
+                ELSE NULL
             END AS data
         FROM all_cattle_vaccines
-        WHERE last_vaccination IS NULL
-           OR next_date < CURRENT_DATE
-           OR next_date <= v_sixty_days_from_now
+        WHERE
+            last_vaccination IS NULL
+            OR next_date < CURRENT_DATE
+            OR next_date <= v_sixty_days_from_now
     ),
-    ),
+
     vaccine_3 AS (
         SELECT
             cd.tag_number,
             cd.name AS cattle_name,
             COALESCE(v.full_name, v.name) AS name,
-            NULL::date AS last_vaccination,
-            NULL::date AS next_date,
-            'Pending'::text AS data
+            NULL::DATE AS last_vaccination,
+            NULL::DATE AS next_date,
+            'Pending'::TEXT AS data
         FROM cattle_data cd
         CROSS JOIN vaccine v
-        WHERE cd.new_is_currently_present = 1
-          AND v.id = 3
-          AND LOWER(cd.gender) = 'female'
-          AND (cd.brucellosis_status = 'NOT_VACCINATED' OR cd.brucellosis_status = 'UNKNOWN')
+        WHERE
+            cd.new_is_currently_present = 1
+            AND v.id = 3
+            AND LOWER(cd.gender) = 'female'
+            AND (
+                cd.brucellosis_status = 'NOT_VACCINATED'
+                OR cd.brucellosis_status = 'UNKNOWN'
+            )
     )
-    SELECT json_agg(row_to_json(combined_data)) INTO json_data
+
+    SELECT json_agg(row_to_json(combined_data))
+    INTO json_data
     FROM (
-        SELECT tag_number, cattle_name, name, last_vaccination, next_date, data
+        SELECT
+            tag_number,
+            cattle_name,
+            name,
+            last_vaccination,
+            next_date,
+            data
         FROM vaccine_1_and_2
         WHERE data IS NOT NULL
-        UNION ALL
-        SELECT tag_number, cattle_name, name, last_vaccination, next_date, data
-        FROM vaccine_3
-    ) AS combined_data;
 
-    RETURN json_data;
+        UNION ALL
+
+        SELECT
+            tag_number,
+            cattle_name,
+            name,
+            last_vaccination,
+            next_date,
+            data
+        FROM vaccine_3
+    ) combined_data;
+
+    RETURN COALESCE(json_data, '[]'::json);
 END;
 $$ LANGUAGE plpgsql;
 

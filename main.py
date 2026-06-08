@@ -15,7 +15,7 @@ from app.schemas.dashboardschema import (
 from app.schemas.cattleprofileschema import CattleProfileApiResponse
 from app.schemas.presentcattleschema import PresentCattleModel
 from app.schemas.genealogyschema import GenealogyCattle
-from app.schemas.donatedoutschema import DonatedOutRecord
+from app.schemas.donatedoutschema import DonatedCattleRecord
 from app.schemas.cattlecardschema import CattleCardResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
@@ -24,18 +24,31 @@ import json
 
 load_dotenv()
 
-origins_str = os.getenv("CORS_ORIGINS", "http://localhost:5173")
-origins = [o.strip() for o in origins_str.split(",") if o.strip()]
+# origins_str = os.getenv("CORS_ORIGINS", "http://localhost:5173")
+# origins = [o.strip() for o in origins_str.split(",") if o.strip()]
 
 app = FastAPI()
 
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=origins,
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# r = redis.Redis(
+#     host="my-redis", port=6379, password="demo@12341234", decode_responses=True
+# )
 
 r = redis.Redis(
     host="localhost", port=6379, password="demo@12341234", decode_responses=True
@@ -123,13 +136,13 @@ async def get_genealogy_all():
         return cattle_list or []
 
 
-@app.get("/donations/donated-out", response_model=List[DonatedOutRecord])
+@app.get("/donations/donated-out", response_model=List[DonatedCattleRecord])
 async def get_donated_out(session: AsyncSession = Depends(get_session)):
     donated_out_json = r.get("donated_out")
     if donated_out_json:
         return json.loads(donated_out_json)
     async for session in get_session():
-        result = await session.execute(text("SELECT get_donated_out_cattle()"))
+        result = await session.execute(text("SELECT get_donated_cattle()"))
         records = result.scalar_one_or_none()
         r.setex("donated_out", 3600 * 24 * 365, json.dumps(records))
         return records or []
