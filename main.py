@@ -1,6 +1,7 @@
 import os
+import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from app.config.db import get_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_session
 from sqlalchemy import text
@@ -11,6 +12,10 @@ from app.schemas.dashboardschema import (
     SpecificCattleMilkApiResponse,
     VaccinationBatchItem,
     VaccinationBatchResponse,
+    CattleRegisterRequest,
+    PhysicalLogsRequest,
+    CattleImageRequest,
+    CattleImagesBatchRequest,
 )
 from app.schemas.cattleprofileschema import CattleProfileApiResponse
 from app.schemas.presentcattleschema import PresentCattleModel
@@ -19,6 +24,7 @@ from app.schemas.donatedoutschema import DonatedCattleRecord
 from app.schemas.cattlecardschema import CattleCardResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
+from fastapi.staticfiles import StaticFiles
 import redis
 import json
 
@@ -28,6 +34,7 @@ load_dotenv()
 # origins = [o.strip() for o in origins_str.split(",") if o.strip()]
 
 app = FastAPI()
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # app.add_middleware(
 #     CORSMiddleware,
@@ -283,3 +290,109 @@ async def create_vaccination_batch(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
         )
+
+
+@app.post("/cattle/register")
+async def register_cattle(
+    payload: CattleRegisterRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        result = await session.execute(
+            text("""
+                SELECT register_cattle(
+                    :name, :tag_number, :acquisition_type,
+                    :date_of_birth, :animal_type,
+                    :mother_name, :mother_tag_number,
+                    :father_name, :father_tag_number,
+                    :is_present, :is_pregnant, :is_milking,
+                    :weight_at_birth, :gender, :brucellosis_status
+                )
+            """),
+            {
+                "name": payload.name, "tag_number": payload.tag_number,
+                "acquisition_type": payload.acquisition_type,
+                "date_of_birth": payload.date_of_birth,
+                "animal_type": payload.animal_type,
+                "mother_name": payload.mother_name,
+                "mother_tag_number": payload.mother_tag_number,
+                "father_name": payload.father_name,
+                "father_tag_number": payload.father_tag_number,
+                "is_present": payload.is_present,
+                "is_pregnant": payload.is_pregnant,
+                "is_milking": payload.is_milking,
+                "weight_at_birth": payload.weight_at_birth,
+                "gender": payload.gender,
+                "brucellosis_status": payload.brucellosis_status,
+            },
+        )
+        data = result.scalar()
+        await session.commit()
+        return data
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        )
+
+
+@app.get("/cattle-search")
+async def search_cattle(q: str = "", session: AsyncSession = Depends(get_session)):
+    result = await session.execute(text("SELECT search_cattle(:q)"), {"q": q})
+    return result.scalar() or []
+
+
+@app.post("/cattle/physical-logs")
+async def save_physical_logs(payload: PhysicalLogsRequest, session: AsyncSession = Depends(get_session)):
+    try:
+        result = await session.execute(
+            text("SELECT insert_physical_logs(:tag, :hip, :head, :ear, :eye, :muzzle, :horn, :skin, :tail, :hump, :udder, :teat, :dewlap, :milk_vein)"),
+            {"tag": payload.tag_number, "hip": payload.hip_width, "head": payload.head, "ear": payload.ear, "eye": payload.eye, "muzzle": payload.muzzle, "horn": payload.horn, "skin": payload.skin, "tail": payload.tail, "hump": payload.hump, "udder": payload.udder, "teat": payload.teat, "dewlap": payload.dewlap, "milk_vein": payload.milk_vein},
+        )
+        data = result.scalar()
+        await session.commit()
+        return data
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.post("/cattle/images")
+async def save_cattle_image(payload: CattleImageRequest, session: AsyncSession = Depends(get_session)):
+    try:
+        result = await session.execute(text("SELECT insert_cattle_image(:tag, :url, :caption)"), {"tag": payload.tag_number, "url": payload.image_url, "caption": payload.caption})
+        await session.commit()
+        return result.scalar()
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.post("/cattle/images/batch")
+async def save_cattle_images_batch(payload: CattleImagesBatchRequest, session: AsyncSession = Depends(get_session)):
+    try:
+        result = await session.execute(text("SELECT insert_cattle_images_batch(:tag, :images)"), {"tag": payload.tag_number, "images": json.dumps(payload.images)})
+        await session.commit()
+        return result.scalar()
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.post("/cattle/images/upload")
+async def upload_cattle_images(files: list[UploadFile] = File(...)):
+    saved = []
+    try:
+        for file in files:
+            filename = f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{file.filename}"
+            filepath = os.path.join("uploads", filename)
+            with open(filepath, "wb") as f:
+                content = await file.read()
+                f.write(content)
+            saved.append(f"/uploads/{filename}")
+        return {"success": True, "files": saved}
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+async def get_cattle_images(tag_number: str, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(text("SELECT get_cattle_images(:tag)"), {"tag": tag_number})
+    return result.scalar() or []

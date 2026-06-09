@@ -1293,3 +1293,56 @@ BEGIN
     );
 END;
 $$ LANGUAGE plpgsql;
+
+
+-- ============================================================
+-- REGISTER NEW CATTLE
+-- ============================================================
+CREATE SEQUENCE IF NOT EXISTS cattle_data_id_seq START 405;
+
+CREATE OR REPLACE FUNCTION register_cattle(
+    p_name TEXT,
+    p_tag_number TEXT DEFAULT NULL,
+    p_acquisition_type TEXT DEFAULT NULL,
+    p_date_of_birth TEXT DEFAULT NULL,
+    p_animal_type TEXT DEFAULT NULL,
+    p_mother_name TEXT DEFAULT NULL,
+    p_mother_tag_number TEXT DEFAULT NULL,
+    p_father_name TEXT DEFAULT NULL,
+    p_father_tag_number TEXT DEFAULT NULL,
+    p_new_is_currently_present BIGINT DEFAULT 1,
+    p_new_is_currently_pregnant BIGINT DEFAULT 0,
+    p_new_is_currenlty_milking BIGINT DEFAULT 0,
+    p_weight_at_birth DOUBLE PRECISION DEFAULT NULL,
+    p_gender TEXT DEFAULT NULL
+) RETURNS JSON AS $$
+DECLARE
+    v_id BIGINT;
+    v_tag TEXT;
+BEGIN
+    v_id := nextval('cattle_data_id_seq');
+    v_tag := COALESCE(p_tag_number, 'SOM-' || LPAD(v_id::TEXT, 3, '0'));
+
+    INSERT INTO cattle_data (
+        id, name, tag_number, acquisition_type, date_of_birth,
+        animal_type, mother_name, mother_tag_number,
+        father_name, father_tag_number,
+        new_is_currently_present, new_is_currently_pregnant,
+        new_is_currenlty_milking, weight_at_birth, gender
+    ) VALUES (
+        v_id, p_name, v_tag, p_acquisition_type, p_date_of_birth,
+        p_animal_type, p_mother_name, p_mother_tag_number,
+        p_father_name, p_father_tag_number,
+        p_new_is_currently_present, p_new_is_currently_pregnant,
+        p_new_is_currenlty_milking, p_weight_at_birth, p_gender
+    );
+
+    RETURN json_build_object(
+        'success', true,
+        'message', 'Cattle registered successfully',
+        'id', v_id,
+        'tag_number', v_tag,
+        'name', p_name
+    );
+END;
+$$ LANGUAGE plpgsql;
