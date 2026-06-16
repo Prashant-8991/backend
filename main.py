@@ -1,7 +1,7 @@
 import os
 import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Header
 from app.config.db import get_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_session
 from sqlalchemy import text
@@ -22,6 +22,18 @@ from app.schemas.presentcattleschema import PresentCattleModel
 from app.schemas.genealogyschema import GenealogyCattle
 from app.schemas.donatedoutschema import DonatedCattleRecord
 from app.schemas.cattlecardschema import CattleCardResponse
+from app.schemas.authschema import (
+    GoogleLoginRequest,
+    AuthResponse,
+    AuthUser,
+    PendingApprovalResponse,
+    UserUpdateRole,
+    UserUpdateApproval,
+    UserListResponse,
+)
+from app.auth.auth import create_access_token, decode_access_token
+from app.auth.dependencies import get_current_user, require_admin, require_admin_or_manager
+from google_auth import verify_google_token
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 from fastapi.staticfiles import StaticFiles
@@ -61,6 +73,208 @@ r = redis.Redis(
     host="localhost", port=6379, password="demo@12341234", decode_responses=True
 )
 
+
+# ── Auth Endpoints ─────────────────────────────────────────────
+
+@app.post("/auth/google")
+async def google_login(
+    payload: GoogleLoginRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    google_user = verify_google_token(payload.id_token)
+    if not google_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Google token",
+        )
+
+    # Look up existing social account
+    result = await session.execute(
+        text("""
+            SELECT u.id, u.email, u.full_name, u.role, u.is_verified, u.is_active, u.created_at, u.last_login,
+                   sa.profile_picture
+            FROM social_accounts sa
+            JOIN users u ON u.id = sa.user_id
+            WHERE sa.provider = 'google' AND sa.provider_user_id = :gid
+        """),
+        {"gid": google_user["google_id"]},
+    )
+    row = result.fetchone()
+
+    if row:
+        user = AuthUser(
+            id=row[0], email=row[1], full_name=row[2],
+            role=row[3], is_verified=row[4], is_active=row[5],
+            created_at=row[6], last_login=row[7], picture=row[8],
+        )
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your account has been deactivated. Contact an administrator.",
+            )
+        if not user.is_verified:
+            return PendingApprovalResponse(email=user.email, full_name=user.full_name)
+
+        await session.execute(
+            text("UPDATE users SET last_login = NOW(), updated_at = NOW() WHERE id = :id"),
+            {"id": str(user.id)},
+        )
+        await session.commit()
+
+        access_token = create_access_token(data={"sub": str(user.id), "role": user.role})
+        return AuthResponse(user=user, access_token=access_token)
+    else:
+        # Check if user with this email already exists (from another Google account or manual)
+        email_result = await session.execute(
+            text("SELECT id FROM users WHERE email = :email"),
+            {"email": google_user["email"]},
+        )
+        existing_user = email_result.fetchone()
+
+        if existing_user:
+            # Link Google account to existing user
+            user_id = existing_user[0]
+            await session.execute(
+                text("""
+                    INSERT INTO social_accounts (id, user_id, provider, provider_user_id, email, profile_picture)
+                    VALUES (gen_random_uuid()::varchar, :uid, 'google', :gid, :email, :pic)
+                """),
+                {"uid": user_id, "gid": google_user["google_id"], "email": google_user["email"], "pic": google_user["picture"]},
+            )
+            await session.commit()
+            # Re-fetch user
+            result = await session.execute(
+                text("SELECT id, email, full_name, role, is_verified, is_active, created_at, last_login FROM users WHERE id = :id"),
+                {"id": user_id},
+            )
+            row = result.fetchone()
+            user = AuthUser(
+                id=row[0], email=row[1], full_name=row[2],
+                role=row[3], is_verified=row[4], is_active=row[5],
+                created_at=row[6], last_login=row[7],
+            )
+            if not user.is_verified:
+                return PendingApprovalResponse(email=user.email, full_name=user.full_name)
+            access_token = create_access_token(data={"sub": str(user.id), "role": user.role})
+            return AuthResponse(user=user, access_token=access_token)
+        else:
+            # Create new user
+            import uuid
+            new_id = str(uuid.uuid4())
+            await session.execute(
+                text("""
+                    INSERT INTO users (id, email, full_name, username, password_hash, role, is_active, is_verified)
+                    VALUES (:id, :email, :name, :username, '', 'viewer', TRUE, FALSE)
+                """),
+                {
+                    "id": new_id,
+                    "email": google_user["email"],
+                    "name": google_user["name"],
+                    "username": google_user["email"],
+                },
+            )
+            await session.execute(
+                text("""
+                    INSERT INTO social_accounts (id, user_id, provider, provider_user_id, email, profile_picture)
+                    VALUES (gen_random_uuid()::varchar, :uid, 'google', :gid, :email, :pic)
+                """),
+                {"uid": new_id, "gid": google_user["google_id"], "email": google_user["email"], "pic": google_user["picture"]},
+            )
+            await session.commit()
+
+            return PendingApprovalResponse(
+                email=google_user["email"],
+                full_name=google_user["name"],
+            )
+
+
+@app.get("/auth/me", response_model=AuthUser)
+async def get_me(current_user: AuthUser = Depends(get_current_user)):
+    return current_user
+
+
+# ── Admin User Management Endpoints ────────────────────────────
+
+@app.get("/admin/users", response_model=list[UserListResponse])
+async def list_users(
+    current_user: AuthUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        text("""
+            SELECT u.id, u.email, u.full_name, sa.profile_picture, u.role, u.is_verified, u.is_active, u.created_at, u.last_login
+            FROM users u
+            LEFT JOIN social_accounts sa ON sa.user_id = u.id AND sa.provider = 'google'
+            ORDER BY u.created_at DESC
+        """)
+    )
+    rows = result.fetchall()
+    return [
+        UserListResponse(
+            id=row[0], email=row[1], full_name=row[2], picture=row[3],
+            role=row[4], is_verified=row[5], is_active=row[6],
+            created_at=row[7], last_login=row[8],
+        )
+        for row in rows
+    ]
+
+
+@app.put("/admin/users/{user_id}/role")
+async def update_user_role(
+    user_id: str,
+    payload: UserUpdateRole,
+    current_user: AuthUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    if payload.role not in ("admin", "manager", "viewer"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid role")
+    result = await session.execute(
+        text("UPDATE users SET role = :role, updated_at = NOW() WHERE id = :id RETURNING id, email, full_name, role, is_verified"),
+        {"role": payload.role, "id": user_id},
+    )
+    row = result.fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    await session.commit()
+    return {"id": str(row[0]), "email": row[1], "full_name": row[2], "role": row[3], "is_verified": row[4]}
+
+
+@app.put("/admin/users/{user_id}/approve")
+async def approve_user(
+    user_id: str,
+    payload: UserUpdateApproval,
+    current_user: AuthUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        text("UPDATE users SET is_verified = :verified, updated_at = NOW() WHERE id = :id RETURNING id, email, full_name, role, is_verified"),
+        {"verified": payload.is_verified, "id": user_id},
+    )
+    row = result.fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    await session.commit()
+    return {"id": str(row[0]), "email": row[1], "full_name": row[2], "role": row[3], "is_verified": row[4]}
+
+
+@app.delete("/admin/users/{user_id}")
+async def delete_user(
+    user_id: str,
+    current_user: AuthUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        text("DELETE FROM users WHERE id = :id RETURNING id"),
+        {"id": user_id},
+    )
+    row = result.fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    await session.commit()
+    return {"message": "User deleted successfully", "id": str(row[0])}
+
+
+# ── Dashboard ──────────────────────────────────────────────────
 
 @app.get("/dashboard", response_model=CattleDashboardApiResponse)
 async def get_dashboard():
@@ -208,7 +422,9 @@ async def get_cattle_milk(
 
 @app.post("/insert-milk-data/")
 async def create_cattle_milk_log(
-    payload: MilkLogCreate, session: AsyncSession = Depends(get_session)
+    payload: MilkLogCreate,
+    current_user: AuthUser = Depends(require_admin_or_manager),
+    session: AsyncSession = Depends(get_session),
 ):
     try:
         result = await session.execute(
@@ -254,6 +470,7 @@ async def get_cattle_vaccine(session: AsyncSession = Depends(get_session)):
 @app.put("/vaccination/brucellosis/{tag_number}")
 async def vaccinate_brucellosis(
     tag_number: str,
+    current_user: AuthUser = Depends(require_admin_or_manager),
     session: AsyncSession = Depends(get_session),
 ):
     try:
@@ -274,6 +491,7 @@ async def vaccinate_brucellosis(
 @app.post("/vaccination-batch", response_model=VaccinationBatchResponse)
 async def create_vaccination_batch(
     payload: list[VaccinationBatchItem],
+    current_user: AuthUser = Depends(require_admin_or_manager),
     session: AsyncSession = Depends(get_session),
 ):
     try:
@@ -292,9 +510,53 @@ async def create_vaccination_batch(
         )
 
 
+@app.put("/cattle/{tag_number}")
+async def update_cattle(
+    tag_number: str,
+    payload: dict,
+    current_user: AuthUser = Depends(require_admin_or_manager),
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        result = await session.execute(
+            text("SELECT update_cattle(:tag, :name, :acq, :dob, :animal, :mname, :mtag, :fname, :ftag, :pres, :preg, :milk, :wt, :gender, :bruc)"),
+            {"tag": tag_number, "name": payload.get("name"), "acq": payload.get("acquisition_type"),
+             "dob": payload.get("date_of_birth"), "animal": payload.get("animal_type"),
+             "mname": payload.get("mother_name"), "mtag": payload.get("mother_tag_number"),
+             "fname": payload.get("father_name"), "ftag": payload.get("father_tag_number"),
+             "pres": payload.get("is_present"), "preg": payload.get("is_pregnant"),
+             "milk": payload.get("is_milking"), "wt": payload.get("weight_at_birth"),
+             "gender": payload.get("gender"), "bruc": payload.get("brucellosis_status")},
+        )
+        data = result.scalar()
+        await session.commit()
+        return data
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.post("/cattle/donate")
+async def donate_cattle(
+    session: AsyncSession = Depends(get_session),
+    current_user: AuthUser = Depends(require_admin_or_manager),
+    tag_number: str = "",
+    donated_to: str = "",
+    mobile_number: str = "",
+):
+    try:
+        result = await session.execute(text("SELECT donate_cattle(:tag, :to, :mob)"), {"tag": tag_number, "to": donated_to, "mob": mobile_number})
+        await session.commit()
+        return result.scalar()
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/cattle/register")
 async def register_cattle(
     payload: CattleRegisterRequest,
+    current_user: AuthUser = Depends(require_admin_or_manager),
     session: AsyncSession = Depends(get_session),
 ):
     try:
@@ -343,7 +605,11 @@ async def search_cattle(q: str = "", session: AsyncSession = Depends(get_session
 
 
 @app.post("/cattle/physical-logs")
-async def save_physical_logs(payload: PhysicalLogsRequest, session: AsyncSession = Depends(get_session)):
+async def save_physical_logs(
+    payload: PhysicalLogsRequest,
+    current_user: AuthUser = Depends(require_admin_or_manager),
+    session: AsyncSession = Depends(get_session),
+):
     try:
         result = await session.execute(
             text("SELECT insert_physical_logs(:tag, :hip, :head, :ear, :eye, :muzzle, :horn, :skin, :tail, :hump, :udder, :teat, :dewlap, :milk_vein)"),
@@ -358,7 +624,11 @@ async def save_physical_logs(payload: PhysicalLogsRequest, session: AsyncSession
 
 
 @app.post("/cattle/images")
-async def save_cattle_image(payload: CattleImageRequest, session: AsyncSession = Depends(get_session)):
+async def save_cattle_image(
+    payload: CattleImageRequest,
+    current_user: AuthUser = Depends(require_admin_or_manager),
+    session: AsyncSession = Depends(get_session),
+):
     try:
         result = await session.execute(text("SELECT insert_cattle_image(:tag, :url, :caption)"), {"tag": payload.tag_number, "url": payload.image_url, "caption": payload.caption})
         await session.commit()
@@ -369,7 +639,11 @@ async def save_cattle_image(payload: CattleImageRequest, session: AsyncSession =
 
 
 @app.post("/cattle/images/batch")
-async def save_cattle_images_batch(payload: CattleImagesBatchRequest, session: AsyncSession = Depends(get_session)):
+async def save_cattle_images_batch(
+    payload: CattleImagesBatchRequest,
+    current_user: AuthUser = Depends(require_admin_or_manager),
+    session: AsyncSession = Depends(get_session),
+):
     try:
         result = await session.execute(text("SELECT insert_cattle_images_batch(:tag, :images)"), {"tag": payload.tag_number, "images": json.dumps(payload.images)})
         await session.commit()
@@ -393,6 +667,57 @@ async def upload_cattle_images(files: list[UploadFile] = File(...)):
         return {"success": True, "files": saved}
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.get("/cattle/images/{tag_number}")
 async def get_cattle_images(tag_number: str, session: AsyncSession = Depends(get_session)):
     result = await session.execute(text("SELECT get_cattle_images(:tag)"), {"tag": tag_number})
     return result.scalar() or []
+
+
+@app.delete("/cattle/images/{image_id}")
+async def delete_cattle_image(
+    image_id: int,
+    current_user: AuthUser = Depends(require_admin_or_manager),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(text("SELECT delete_cattle_image(:id)"), {"id": image_id})
+    await session.commit()
+    return result.scalar()
+
+
+@app.post("/cattle/pregnancy-logs")
+async def add_pregnancy_log(
+    session: AsyncSession = Depends(get_session),
+    current_user: AuthUser = Depends(require_admin_or_manager),
+    tag_number: str = "",
+    conception_date: str = None,
+    birth_date: str = None,
+):
+    result = await session.execute(text("SELECT insert_pregnancy_log(:tag, :c, :b)"), {"tag": tag_number, "c": conception_date, "b": birth_date})
+    await session.commit()
+    return result.scalar()
+
+
+@app.put("/cattle/pregnancy-logs/{log_id}")
+async def update_pregnancy_log(
+    log_id: int,
+    current_user: AuthUser = Depends(require_admin_or_manager),
+    session: AsyncSession = Depends(get_session),
+    conception_date: str = None,
+    birth_date: str = None,
+):
+    result = await session.execute(text("SELECT update_pregnancy_log(:id, :c, :b)"), {"id": log_id, "c": conception_date, "b": birth_date})
+    await session.commit()
+    return result.scalar()
+
+
+@app.delete("/cattle/pregnancy-logs/{log_id}")
+async def delete_pregnancy_log(
+    log_id: int,
+    current_user: AuthUser = Depends(require_admin_or_manager),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(text("SELECT delete_pregnancy_log(:id)"), {"id": log_id})
+    await session.commit()
+    return result.scalar()

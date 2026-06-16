@@ -851,7 +851,9 @@ begin
                     extract(year from age(now(), me.date_of_birth::date))::text || ' years'
                 else 'Not available'
             end,
-            'average_milk_per_day', case when me.new_is_currenlty_milking = 1 then (select round(avg(milk)::numeric, 1) from cattle_milk_logs where tag_number = target_tag) else null end
+            'average_milk_per_day', case when me.new_is_currenlty_milking = 1 then (select round(avg(milk)::numeric, 1) from cattle_milk_logs where tag_number = target_tag) else null end,
+            'gender', me.gender,
+            'animal_type', me.animal_type
         ),
         'milk_by_month', case when me.new_is_currenlty_milking = 1
             then coalesce((select json_agg(json_build_object('date', month_group, 'milk', total_milk)) from (
