@@ -53,6 +53,8 @@ class CattleCardOverview(BaseModel):
     last_calving_date: str | None = None
     mother: ParentInfo | str | None = None
     father: ParentInfo | str | None = None
+    mother_tag_number: str | None = None
+    father_tag_number: str | None = None
     childrens: list[SiblingInfo] = []
     breed_score: BreedScore | None = None
     weight: str | None = None

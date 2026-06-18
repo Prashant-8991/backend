@@ -1,5 +1,6 @@
 import os
 import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Header
 from app.config.db import get_session
@@ -13,6 +14,7 @@ from app.schemas.dashboardschema import (
     VaccinationBatchItem,
     VaccinationBatchResponse,
     CattleRegisterRequest,
+    CattleUpdateRequest,
     PhysicalLogsRequest,
     CattleImageRequest,
     CattleImagesBatchRequest,
@@ -40,7 +42,8 @@ from fastapi.staticfiles import StaticFiles
 import redis
 import json
 
-load_dotenv()
+# Load .env from the backend directory regardless of where the app is started
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # origins_str = os.getenv("CORS_ORIGINS", "http://localhost:5173")
 # origins = [o.strip() for o in origins_str.split(",") if o.strip()]
@@ -359,14 +362,36 @@ async def get_genealogy_all():
 
 @app.get("/donations/donated-out", response_model=List[DonatedCattleRecord])
 async def get_donated_out(session: AsyncSession = Depends(get_session)):
-    donated_out_json = r.get("donated_out")
-    if donated_out_json:
-        return json.loads(donated_out_json)
     async for session in get_session():
         result = await session.execute(text("SELECT get_donated_cattle()"))
-        records = result.scalar_one_or_none()
-        r.setex("donated_out", 3600 * 24 * 365, json.dumps(records))
-        return records or []
+        records = result.scalar_one_or_none() or []
+        import logging
+        logger = logging.getLogger("donations")
+        logger.info("raw records count: %d", len(records))
+
+        seen: dict[str, dict] = {}
+        for r in records:
+            if not isinstance(r, dict):
+                r = dict(r)
+            tag = r.get("tag_number")
+            if tag:
+                existing = seen.get(tag)
+                if existing:
+                    existing_date = (existing.get("donated_date") or "")
+                    new_date = (r.get("donated_date") or "")
+                    if new_date > existing_date:
+                        seen[tag] = r
+                else:
+                    seen[tag] = r
+            else:
+                # record without a tag — keep it with a unique key
+                seen.setdefault(f"__no_tag_{id(r)}", r)
+
+        dedup = list(seen.values())
+        logger.info("deduped records count: %d", len(dedup))
+
+        # r.setex("donated_out", 3600 * 24 * 365, json.dumps(dedup))
+        return dedup
 
 
 @app.get("/cattle-card/{tag_number}", response_model=CattleCardResponse)
@@ -378,12 +403,132 @@ async def get_cattle_card(
         text("SELECT get_cattle_card_data(:tag)"),
         {"tag": tag_number},
     )
+    # print("result", result.scalar())
     card_data = result.scalar()
+    print(card_data)
 
-    if card_data is None:
+    if card_data is not None:
+        return card_data
+
+    # Fallback: the lineage CTE may drop cattle with broken parent chains.
+    # If the tag exists in cattle_data, return a minimal card so the UI can show it.
+    row_result = await session.execute(
+        text("""
+            SELECT name, tag_number, acquisition_type, date_of_birth, animal_type,
+                   mother_name, mother_tag_number, father_name, father_tag_number,
+                   new_is_currently_present, new_is_currently_pregnant, new_is_currenlty_milking,
+                   weight_at_birth, gender
+            FROM cattle_data WHERE tag_number = :tag
+        """),
+        {"tag": tag_number},
+    )
+    row = row_result.fetchone()
+    if row is None:
         raise HTTPException(status_code=404, detail="Cattle not found")
 
-    return card_data
+    name, tag, acq, dob, animal, mname, mtag, fname, ftag, present, pregnant, milking, weight, gender = row
+    return {
+        "overview": {
+            "name": name,
+            "tag_number": tag,
+            "acquisition_type": acq or "Not available",
+            "generation": "Not available",
+            "DOB": dob or "Not available",
+            "total_childrens": 0,
+            "siblings": [],
+            "is_present": present,
+            "lactation_cycle": "Lactating" if milking else ("Pregnant" if pregnant else "Not available"),
+            "last_calving_date": "Not available",
+            "mother": mname or (mtag if mtag else "Not available"),
+            "father": fname or (ftag if ftag else "Not available"),
+            "childrens": [],
+            "breed_score": None,
+            "weight": str(weight) if weight is not None else "Not available",
+            "age": "Not available",
+            "average_milk_per_day": None,
+            "gender": gender,
+            "animal_type": animal,
+            "mother_tag_number": mtag,
+            "father_tag_number": ftag,
+        },
+        "milk_by_month": [],
+        "milk_by_day_only_for_month": [],
+        "family": {"mother": None, "father": None, "siblings": [], "childrens": []},
+        "pregnancy_logs": [],
+    }
+
+
+
+@app.get("/cattle-cardnew/{tag_number}")
+async def get_cattle_card(
+    tag_number: str,
+    session: AsyncSession = Depends(get_session),
+):
+    overview_query = await session.execute(text("""
+        SELECT name, tag_number as tag, acquisition_type, gen as generation, date_of_birth as "DOB", new_is_currently_present as is_present, gender, animal_type, mother_tag_number, father_tag_number, age
+        FROM cattle_data_view 
+        WHERE tag_number = :tag_number
+    """), {"tag_number": tag_number})
+    total_childrens_query = await session.execute(text("""
+        select name, tag_number, age, gen, new_is_currently_present as is_present from cattle_data_view where mother_tag_number = :tag_number or father_tag_number = :tag_number
+    """), {"tag_number": tag_number})
+    sibling_query = await session.execute(text("""
+        select name, tag_number as tag, acquisition_type, gen as generation, date_of_birth, new_is_currently_present as is_present, gender, animal_type, mother_tag_number, father_tag_number, age FROM cattle_data_view WHERE mother_tag_number = (select mother_tag_number from cattle_data_view WHERE tag_number = :tag_number);
+    """), {"tag_number": tag_number})
+    last_calving_query = await session.execute(text("""
+        select birth_date as last_calving_date FROM cattle_pragnancies_logs WHERE tag_number = :tag_number
+        order BY birth_date DESC LIMIT 1;
+    """), {"tag_number": tag_number})
+    pregnancies_logs_query = await session.execute(text("""
+        select id, conception_date, birth_date  FROM public.cattle_pragnancies_logs WHERE tag_number = :tag_number;
+    """), {"tag_number": tag_number})
+    name, tag,  acquisition_type, generation,dob, is_present,gender, animal_type, mother_tag_number, father_tag_number, age  = overview_query.fetchone()
+    childrens_result = [{"name": data[0], "tag_number": data[1], "age": data[2], "gen": data[3], "is_present": data[4]} for data in total_childrens_query.fetchall()]
+    pregnancies_logs_result = [{"id": data[0], "conception_date": data[1], "birth_date": data[2] } for data in pregnancies_logs_query.fetchall()]
+    sibling_result = [
+        {
+            "name": data[0], 
+            "tag_number": data[1], 
+            "acquisition_type": data[2],  # Added quotes
+            "generation": data[3],        # Added quotes
+            "dob": data[4],
+            "is_present": data[5],        # Added quotes
+            "gender": data[6], 
+            "animal_type": data[7], 
+            "mother_tag_number": data[8], 
+            "father_tag_number": data[9], # Added quotes
+            "age": data[10]  
+        } 
+        for data in sibling_query.fetchall()
+    ]
+    return {
+        "overview": {
+            "name": name,
+            "tag_number": tag,
+            "acquisition_type": acquisition_type or "Not available",
+            "generation": generation or "Not available",
+            "DOB": dob or "Not available",
+            "total_childrens": len(childrens_result),
+            "siblings": sibling_result or [],
+            "is_present": is_present,
+            # "lactation_cycle": "Lactating" if milking else ("Pregnant" if pregnant else "Not available"),
+            "last_calving_date": last_calving_query.scalar_one_or_none() or "Not available",
+            
+            "childrens": childrens_result or [],
+            "breed_score": None,
+            # "weight": str(weight) if weight is not None else "Not available",
+            "age": age, 
+            "average_milk_per_day": None,
+            "gender": gender,
+            "animal_type": animal_type,
+            "mother_tag_number": mother_tag_number,
+            "father_tag_number": father_tag_number,
+        },
+        "milk_by_month": [],
+        "milk_by_day_only_for_month": [],
+        "pregnancy_logs": pregnancies_logs_result or [],
+    }
+    
 
 
 @app.get("/cattle-milk/", response_model=list[SpecificCattleMilkApiResponse])
@@ -510,23 +655,37 @@ async def create_vaccination_batch(
         )
 
 
+def _normalize(value: str | None) -> str | None:
+    return value if value else None
+
+
 @app.put("/cattle/{tag_number}")
 async def update_cattle(
     tag_number: str,
-    payload: dict,
+    payload: CattleUpdateRequest,
     current_user: AuthUser = Depends(require_admin_or_manager),
     session: AsyncSession = Depends(get_session),
 ):
     try:
         result = await session.execute(
             text("SELECT update_cattle(:tag, :name, :acq, :dob, :animal, :mname, :mtag, :fname, :ftag, :pres, :preg, :milk, :wt, :gender, :bruc)"),
-            {"tag": tag_number, "name": payload.get("name"), "acq": payload.get("acquisition_type"),
-             "dob": payload.get("date_of_birth"), "animal": payload.get("animal_type"),
-             "mname": payload.get("mother_name"), "mtag": payload.get("mother_tag_number"),
-             "fname": payload.get("father_name"), "ftag": payload.get("father_tag_number"),
-             "pres": payload.get("is_present"), "preg": payload.get("is_pregnant"),
-             "milk": payload.get("is_milking"), "wt": payload.get("weight_at_birth"),
-             "gender": payload.get("gender"), "bruc": payload.get("brucellosis_status")},
+            {
+                "tag": tag_number,
+                "name": _normalize(payload.name),
+                "acq": _normalize(payload.acquisition_type),
+                "dob": _normalize(payload.date_of_birth),
+                "animal": _normalize(payload.animal_type),
+                "mname": _normalize(payload.mother_name),
+                "mtag": _normalize(payload.mother_tag_number),
+                "fname": _normalize(payload.father_name),
+                "ftag": _normalize(payload.father_tag_number),
+                "pres": payload.is_present,
+                "preg": payload.is_pregnant,
+                "milk": payload.is_milking,
+                "wt": payload.weight_at_birth,
+                "gender": _normalize(payload.gender),
+                "bruc": _normalize(payload.brucellosis_status),
+            },
         )
         data = result.scalar()
         await session.commit()

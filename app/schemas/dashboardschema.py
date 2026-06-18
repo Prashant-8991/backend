@@ -109,6 +109,24 @@ class CattleRegisterRequest(BaseModel):
     brucellosis_status: str | None = None
 
 
+class CattleUpdateRequest(BaseModel):
+    name: str | None = None
+    tag_number: str | None = None
+    acquisition_type: str | None = None
+    date_of_birth: str | None = None
+    animal_type: str | None = None
+    mother_name: str | None = None
+    mother_tag_number: str | None = None
+    father_name: str | None = None
+    father_tag_number: str | None = None
+    is_present: int | None = None
+    is_pregnant: int | None = None
+    is_milking: int | None = None
+    weight_at_birth: float | None = None
+    gender: str | None = None
+    brucellosis_status: str | None = None
+
+
 class PhysicalLogsRequest(BaseModel):
     tag_number: str
     hip_width: str | None = "0"

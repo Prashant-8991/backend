@@ -125,15 +125,17 @@ begin
                                         cattle_data cd
                                     WHERE
                                         cd.mother_tag_number IS NULL
-                                        AND cd.father_tag_number IS NULL
-                                    UNION ALL
+                                        OR cd.mother_tag_number NOT IN (SELECT tag_number FROM cattle_data)
+                                    UNION
                                     -- 2. Recursive Member
                                     SELECT
                                         child.*,
                                         parent.generation_level + 1 AS generation_level
                                     FROM
                                         cattle_data child
-                                        INNER JOIN cattle_lineage parent ON child.mother_tag_number = parent.tag_number
+                                        INNER JOIN cattle_lineage parent
+                                            ON child.mother_tag_number = parent.tag_number
+                                            OR child.father_tag_number = parent.tag_number
                                 )
                             SELECT
                                 *
@@ -162,15 +164,17 @@ begin
                                 cattle_data cd
                             WHERE
                                 cd.mother_tag_number IS NULL
-                                AND cd.father_tag_number IS NULL
-                            UNION ALL
+                                OR cd.mother_tag_number NOT IN (SELECT tag_number FROM cattle_data)
+                            UNION
                             -- 2. Recursive Member
                             SELECT
                                 child.*,
                                 parent.generation_level + 1 AS generation_level
                             FROM
                                 cattle_data child
-                                INNER JOIN cattle_lineage parent ON child.mother_tag_number = parent.tag_number
+                                INNER JOIN cattle_lineage parent
+                                    ON child.mother_tag_number = parent.tag_number
+                                    OR child.father_tag_number = parent.tag_number
                         )
                     SELECT
                         cl.tag_number,
@@ -213,15 +217,17 @@ begin
                                 cattle_data cd
                             WHERE
                                 cd.mother_tag_number IS NULL
-                                AND cd.father_tag_number IS NULL
-                            UNION ALL
-                            -- 2. Recursive Member
+                                OR cd.mother_tag_number NOT IN (SELECT tag_number FROM cattle_data)
+                            UNION
+                            -- 2. Recursive Member (The First Generation)
                             SELECT
                                 child.*,
                                 parent.generation_level + 1 AS generation_level
                             FROM
                                 cattle_data child
-                                INNER JOIN cattle_lineage parent ON child.mother_tag_number = parent.tag_number
+                                INNER JOIN cattle_lineage parent
+                                    ON child.mother_tag_number = parent.tag_number
+                                    OR child.father_tag_number = parent.tag_number
                         )
                     SELECT
                         cl.tag_number,
@@ -416,8 +422,9 @@ begin
             new_is_currently_present,
             1 as generation_level
         from cattle_data
-        where mother_tag_number is null and father_tag_number is null
-        union all
+        where mother_tag_number is null
+           or mother_tag_number not in (select tag_number from cattle_data)
+        union
         select
             child.tag_number,
             child.mother_tag_number,
@@ -427,7 +434,9 @@ begin
             child.new_is_currently_present,
             parent.generation_level + 1
         from cattle_data child
-        inner join cattle_lineage parent on child.mother_tag_number = parent.tag_number
+        inner join cattle_lineage parent
+            on child.mother_tag_number = parent.tag_number
+            or child.father_tag_number = parent.tag_number
     ),
     overview_cte as (
         select
@@ -491,8 +500,12 @@ begin
             s.tag_number,
             s.date_of_birth
         from cattle_data s
-        where s.mother_tag_number = (select mother_tag_number from cattle_data where tag_number = target_tag)
-          and s.tag_number != target_tag
+        where s.tag_number != target_tag
+          and (
+              (s.mother_tag_number is not null and s.mother_tag_number = (select mother_tag_number from cattle_data where tag_number = target_tag))
+              or
+              (s.father_tag_number is not null and s.father_tag_number = (select father_tag_number from cattle_data where tag_number = target_tag))
+          )
     ),
     family_cte as (
         select
@@ -608,12 +621,15 @@ begin
             1 as generation_level
         from cattle_data cd
         where cd.mother_tag_number is null
-        union all
+           or cd.mother_tag_number not in (select tag_number from cattle_data)
+        union
         select
             child.*,
             parent.generation_level + 1 as generation_level
         from cattle_data child
-        inner join cattle_lineage parent on child.mother_tag_number = parent.tag_number
+        inner join cattle_lineage parent
+            on child.mother_tag_number = parent.tag_number
+            or child.father_tag_number = parent.tag_number
     )
     select
         json_agg(genealogy_data)
@@ -759,8 +775,9 @@ begin
             cd.new_is_currenlty_milking, cd.weight_at_birth, cd.gender,
             1::int as generation_level
         from cattle_data cd
-        where cd.mother_tag_number is null and cd.father_tag_number is null
-        union all
+        where cd.mother_tag_number is null
+           or cd.mother_tag_number not in (select tag_number from cattle_data)
+        union
         select
             child.id, child.name, child.tag_number, child.acquisition_type,
             child.date_of_birth, child.animal_type, child.mother_name,
@@ -769,7 +786,9 @@ begin
             child.new_is_currenlty_milking, child.weight_at_birth, child.gender,
             (parent.generation_level + 1)::int as generation_level
         from cattle_data child
-        inner join cattle_lineage parent on child.mother_tag_number = parent.tag_number
+        inner join cattle_lineage parent
+            on child.mother_tag_number = parent.tag_number
+            or child.father_tag_number = parent.tag_number
     ),
     me as (
         select * from cattle_lineage where tag_number = target_tag
@@ -818,7 +837,7 @@ begin
             'generation', coalesce(me.generation_level::text, 'Not available'),
             'DOB', coalesce(me.date_of_birth, 'Not available'),
             'total_childrens', (select count(*) from cattle_data where mother_tag_number = target_tag),
-            'siblings', coalesce((select json_agg(json_build_object('name', sib.name, 'tag_number', sib.tag_number, 'generation', sib.generation_level)) from cattle_lineage sib where sib.mother_tag_number = me.mother_tag_number and sib.tag_number != target_tag), '[]'::json),
+            'siblings', coalesce((select json_agg(json_build_object('name', sib.name, 'tag_number', sib.tag_number, 'generation', sib.generation_level)) from cattle_lineage sib where sib.tag_number != target_tag and ((sib.mother_tag_number is not null and sib.mother_tag_number = me.mother_tag_number) or (sib.father_tag_number is not null and sib.father_tag_number = me.father_tag_number))), '[]'::json),
             'is_present', me.new_is_currently_present,
             'lactation_cycle', case
                 when me.new_is_currenlty_milking = 1 then 'Lactating'
@@ -829,6 +848,8 @@ begin
             'last_calving_date', coalesce((select birth_date from cattle_pragnancies_logs where tag_number = target_tag and birth_date is not null order by birth_date desc limit 1), 'Not available'),
             'mother', case when me.mother_tag_number is not null and (select name from cattle_lineage where tag_number = me.mother_tag_number) is not null then (select json_build_object('name', m.name, 'tag_number', m.tag_number, 'generation', m.generation_level) from cattle_lineage m where m.tag_number = me.mother_tag_number) else to_json('Not available'::text) end,
             'father', case when me.father_tag_number is not null and (select name from cattle_lineage where tag_number = me.father_tag_number) is not null then (select json_build_object('name', f.name, 'tag_number', f.tag_number, 'generation', f.generation_level) from cattle_lineage f where f.tag_number = me.father_tag_number) else to_json('Not available'::text) end,
+            'mother_tag_number', me.mother_tag_number,
+            'father_tag_number', me.father_tag_number,
             'childrens', coalesce((select json_agg(json_build_object('name', c.name, 'tag_number', c.tag_number, 'generation', c.generation_level)) from cattle_lineage c where c.mother_tag_number = target_tag), '[]'::json),
             'breed_score', json_build_object(
                 'hip_width', coalesce((select hip_width from phys), '0'),
@@ -1348,3 +1369,100 @@ BEGIN
     );
 END;
 $$ LANGUAGE plpgsql;
+
+
+
+SELECT get_dashboard_data();
+
+
+select count(*) FROM cattle_milk_logs;
+
+
+
+create or REPLACE VIEW cattle_data_view as (
+    WITH RECURSIVE
+        generation_cte AS (
+            -- Root animals
+            SELECT
+                id,
+                name,
+                tag_number,
+                acquisition_type,
+                date_of_birth,
+                animal_type,
+                mother_name,
+                mother_tag_number,
+                father_name,
+                father_tag_number,
+                new_is_currently_present,
+                new_is_currently_pregnant,
+                new_is_currenlty_milking,
+                weight_at_birth,
+                gender,
+                brucellosis_status,
+                1 as gen
+            FROM
+                cattle_data
+            WHERE
+                mother_tag_number IS NULL
+            UNION ALL
+            -- Child animals
+            SELECT
+                cd.id,
+                cd.name,
+                cd.tag_number,
+                cd.acquisition_type,
+                cd.date_of_birth,
+                cd.animal_type,
+                cd.mother_name,
+                cd.mother_tag_number,
+                cd.father_name,
+                cd.father_tag_number,
+                cd.new_is_currently_present,
+                cd.new_is_currently_pregnant,
+                cd.new_is_currenlty_milking,
+                cd.weight_at_birth,
+                cd.gender,
+                cd.brucellosis_status,
+                gc.gen + 1
+            FROM
+                generation_cte gc
+                JOIN cattle_data cd ON gc.tag_number = cd.mother_tag_number
+        )
+        -- Calculate the age just ONCE in the final SELECT
+    SELECT
+        gc.*,
+        CASE
+            WHEN a.calc_age IS NULL THEN NULL
+            ELSE CONCAT(
+                EXTRACT(
+                    YEAR
+                    FROM
+                        a.calc_age
+                )::INT,
+                ' Years, ',
+                EXTRACT(
+                    MONTH
+                    FROM
+                        a.calc_age
+                )::INT,
+                ' Months, ',
+                EXTRACT(
+                    DAY
+                    FROM
+                        a.calc_age
+                )::INT,
+                ' Days'
+            )
+        END AS age
+    FROM
+        generation_cte gc
+        LEFT JOIN LATERAL (
+            SELECT
+                AGE (
+                    CURRENT_DATE,
+                    -- Safely handle both dashes and empty strings before casting to DATE
+                    NULLIF(NULLIF(TRIM(gc.date_of_birth), '-'), '')::DATE
+                ) AS calc_age
+        ) a ON TRUE
+);
