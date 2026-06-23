@@ -18,6 +18,8 @@ from app.schemas.dashboardschema import (
     PhysicalLogsRequest,
     CattleImageRequest,
     CattleImagesBatchRequest,
+    ReportResponse,
+    ReportColumn,
 )
 from app.schemas.cattleprofileschema import CattleProfileApiResponse
 from app.schemas.presentcattleschema import PresentCattleModel
@@ -392,6 +394,31 @@ async def get_donated_out(session: AsyncSession = Depends(get_session)):
 
         # r.setex("donated_out", 3600 * 24 * 365, json.dumps(dedup))
         return dedup
+
+
+@app.get("/report", response_model=ReportResponse)
+async def get_report(session: AsyncSession = Depends(get_session)):
+    # Get column names and types from the view
+    col_result = await session.execute(
+        text("""
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_name = 'cattle_data_view'
+            ORDER BY ordinal_position
+        """)
+    )
+    columns = [
+        ReportColumn(name=row[0], type=row[1])
+        for row in col_result.fetchall()
+    ]
+
+    # Get all data from the view
+    data_result = await session.execute(
+        text("SELECT * FROM cattle_data_view ORDER BY tag_number")
+    )
+    rows = [dict(zip([c.name for c in columns], row)) for row in data_result.fetchall()]
+
+    return ReportResponse(columns=columns, rows=rows)
 
 
 @app.get("/cattle-card/{tag_number}", response_model=CattleCardResponse)

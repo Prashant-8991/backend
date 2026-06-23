@@ -153,3 +153,13 @@ class CattleImageRequest(BaseModel):
 class CattleImagesBatchRequest(BaseModel):
     tag_number: str
     images: list[str]
+
+
+class ReportColumn(BaseModel):
+    name: str
+    type: str
+
+
+class ReportResponse(BaseModel):
+    columns: list[ReportColumn]
+    rows: list[dict]
