@@ -20,6 +20,7 @@ from app.schemas.dashboardschema import (
     CattleImagesBatchRequest,
     ReportResponse,
     ReportColumn,
+    DailyOpItem,
 )
 from app.schemas.cattleprofileschema import CattleProfileApiResponse
 from app.schemas.presentcattleschema import PresentCattleModel
@@ -907,3 +908,61 @@ async def delete_pregnancy_log(
     result = await session.execute(text("SELECT delete_pregnancy_log(:id)"), {"id": log_id})
     await session.commit()
     return result.scalar()
+
+
+@app.post("/daily-ops/batch")
+async def save_daily_ops_batch(
+    payload: list[DailyOpItem],
+    current_user: AuthUser = Depends(require_admin_or_manager),
+    session: AsyncSession = Depends(get_session),
+):
+    results = []
+    for item in payload:
+        try:
+            if item.milk_litres is not None:
+                # Delete any existing record for today first, then insert (works without unique constraint)
+                await session.execute(
+                    text("DELETE FROM cattle_milk_logs WHERE tag_number = :tag AND date = :date"),
+                    {"tag": item.tag_number, "date": datetime.date.today()},
+                )
+                await session.execute(
+                    text("INSERT INTO cattle_milk_logs (tag_number, date, milk) VALUES (:tag, :date, :milk)"),
+                    {"tag": item.tag_number, "date": datetime.date.today(), "milk": item.milk_litres},
+                )
+
+            if item.is_milking is not None:
+                await session.execute(
+                    text("UPDATE cattle_data SET new_is_currenlty_milking = :milk WHERE tag_number = :tag"),
+                    {"tag": item.tag_number, "milk": item.is_milking},
+                )
+
+            if item.vaccine_fmd_done:
+                await session.execute(
+                    text("""
+                        INSERT INTO cattle_vaccine_logs (tag_number, vaccine_id, vaccinated_on)
+                        VALUES (:tag, :vid, :date)
+                    """),
+                    {"tag": item.tag_number, "vid": 1, "date": datetime.date.today()},
+                )
+
+            if item.vaccine_hs_done:
+                await session.execute(
+                    text("""
+                        INSERT INTO cattle_vaccine_logs (tag_number, vaccine_id, vaccinated_on)
+                        VALUES (:tag, :vid, :date)
+                    """),
+                    {"tag": item.tag_number, "vid": 2, "date": datetime.date.today()},
+                )
+
+            if item.vaccine_brucellosis_done:
+                await session.execute(
+                    text("UPDATE cattle_data SET brucellosis_status = 'VACCINATED' WHERE tag_number = :tag"),
+                    {"tag": item.tag_number},
+                )
+
+            results.append({"tag_number": item.tag_number, "success": True})
+        except Exception as e:
+            results.append({"tag_number": item.tag_number, "success": False, "error": str(e)})
+
+    await session.commit()
+    return {"success": True, "items": results}

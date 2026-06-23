@@ -163,3 +163,12 @@ class ReportColumn(BaseModel):
 class ReportResponse(BaseModel):
     columns: list[ReportColumn]
     rows: list[dict]
+
+
+class DailyOpItem(BaseModel):
+    tag_number: str
+    milk_litres: float | None = None
+    is_milking: int | None = None
+    vaccine_fmd_done: bool | None = None
+    vaccine_hs_done: bool | None = None
+    vaccine_brucellosis_done: bool | None = None
