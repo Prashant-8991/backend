@@ -21,6 +21,8 @@ from app.schemas.dashboardschema import (
     ReportResponse,
     ReportColumn,
     DailyOpItem,
+    TopCurrentMonthMilker,
+    BottomCurrentMonthMilker,
 )
 from app.schemas.cattleprofileschema import CattleProfileApiResponse
 from app.schemas.presentcattleschema import PresentCattleModel
@@ -306,6 +308,173 @@ async def get_dashboard():
         return dashboard_data
 
 
+@app.get("/dashboard/top-milkers-current-month", response_model=list[TopCurrentMonthMilker])
+async def top_milkers_current_month(session: AsyncSession = Depends(get_session)):
+    """Top 10 milking cows for the current calendar month."""
+    result = await session.execute(
+        text("""
+            SELECT
+                cd.tag_number,
+                cd.name,
+                ROUND(SUM(cml.milk)::numeric, 1) AS total_milk,
+                ROUND(AVG(cml.milk)::numeric, 1) AS avg_milk,
+                COUNT(*) AS days_logged,
+                cd.gender,
+                cd.animal_type
+            FROM cattle_milk_logs cml
+            JOIN cattle_data cd ON cd.tag_number = cml.tag_number
+            WHERE cml.date >= date_trunc('month', CURRENT_DATE)
+              AND cml.date < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
+            GROUP BY cd.tag_number, cd.name, cd.gender, cd.animal_type
+            ORDER BY total_milk DESC
+            LIMIT 10
+        """)
+    )
+    rows = result.fetchall()
+    return [
+        TopCurrentMonthMilker(
+            tag_number=row[0], name=row[1], total_milk=float(row[2] or 0),
+            avg_milk=float(row[3]) if row[3] is not None else None,
+            days_logged=row[4], gender=row[5], animal_type=row[6],
+        )
+        for row in rows
+    ]
+
+
+@app.get("/dashboard/bottom-milkers-current-month", response_model=list[BottomCurrentMonthMilker])
+async def bottom_milkers_current_month(session: AsyncSession = Depends(get_session)):
+    """Bottom 10 milking cows for the current calendar month (lowest total milk)."""
+    result = await session.execute(
+        text("""
+            SELECT
+                cd.tag_number,
+                cd.name,
+                ROUND(SUM(cml.milk)::numeric, 1) AS total_milk,
+                ROUND(AVG(cml.milk)::numeric, 1) AS avg_milk,
+                COUNT(*) AS days_logged,
+                cd.gender,
+                cd.animal_type
+            FROM cattle_milk_logs cml
+            JOIN cattle_data cd ON cd.tag_number = cml.tag_number
+            WHERE cml.date >= date_trunc('month', CURRENT_DATE)
+              AND cml.date < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
+              AND cd.new_is_currenlty_milking = 1
+            GROUP BY cd.tag_number, cd.name, cd.gender, cd.animal_type
+            ORDER BY total_milk ASC
+            LIMIT 10
+        """)
+    )
+    rows = result.fetchall()
+    return [
+        BottomCurrentMonthMilker(
+            tag_number=row[0], name=row[1], total_milk=float(row[2] or 0),
+            avg_milk=float(row[3]) if row[3] is not None else None,
+            days_logged=row[4], gender=row[5], animal_type=row[6],
+        )
+        for row in rows
+    ]
+
+
+@app.get("/cattle/parent-options")
+async def get_parent_options(session: AsyncSession = Depends(get_session)):
+    """All present female cattle (mothers) and bulls (fathers) for selection dropdowns."""
+    result = await session.execute(
+        text("""
+            SELECT tag_number, name, gender, animal_type
+            FROM cattle_data
+            WHERE new_is_currently_present = 1
+            ORDER BY name, tag_number
+        """)
+    )
+    rows = result.fetchall()
+    mothers = [
+        {"tag_number": r[0], "name": r[1], "gender": r[2], "animal_type": r[3]}
+        for r in rows
+        if r[2] and str(r[2]).lower() == "female"
+    ]
+    fathers = [
+        {"tag_number": r[0], "name": r[1], "gender": r[2], "animal_type": r[3]}
+        for r in rows
+        if (r[3] and str(r[3]).upper() == "BULL")
+        or (not r[3] and r[2] and str(r[2]).lower() == "male")
+    ]
+    return {"mothers": mothers, "fathers": fathers}
+
+
+@app.get("/cattle/fathers", response_model=List[GenealogyCattle])
+async def get_bull_fathers(q: str = "", session: AsyncSession = Depends(get_session)):
+    """Return all present bulls as potential fathers."""
+    result = await session.execute(
+        text("""
+            SELECT DISTINCT
+                cd.tag_number,
+                cd.name,
+                cd.gender,
+                cd.animal_type,
+                cd.acquisition_type,
+                cd.date_of_birth::text,
+                cd.new_is_currently_present AS is_present,
+                cd.new_is_currenlty_milking AS is_milking,
+                cd.new_is_currently_pregnant AS is_pregnant,
+                cd.mother_tag_number,
+                cd.father_tag_number
+            FROM cattle_data cd
+            WHERE cd.animal_type = 'BULL'
+              AND cd.new_is_currently_present = 1
+              AND (:q = '' OR cd.name ILIKE '%' || :q || '%' OR cd.tag_number ILIKE '%' || :q || '%')
+            ORDER BY cd.tag_number
+        """),
+        {"q": q or ""},
+    )
+    rows = result.fetchall()
+    return [
+        GenealogyCattle(
+            tag_number=row[0], name=row[1], gender=row[2], animal_type=row[3],
+            acquisition_type=row[4], date_of_birth=row[5], is_present=row[6],
+            is_milking=row[7], is_pregnant=row[8], mother_tag_number=row[9],
+            father_tag_number=row[10],
+        )
+        for row in rows
+    ]
+
+
+@app.get("/cattle/mothers", response_model=List[GenealogyCattle])
+async def get_cow_mothers(q: str = "", session: AsyncSession = Depends(get_session)):
+    """Return all present female cattle as potential mothers."""
+    result = await session.execute(
+        text("""
+            SELECT DISTINCT
+                cd.tag_number,
+                cd.name,
+                cd.gender,
+                cd.animal_type,
+                cd.acquisition_type,
+                cd.date_of_birth::text,
+                cd.new_is_currently_present AS is_present,
+                cd.new_is_currenlty_milking AS is_milking,
+                cd.new_is_currently_pregnant AS is_pregnant,
+                cd.mother_tag_number,
+                cd.father_tag_number
+            FROM cattle_data cd
+            WHERE cd.gender ILIKE 'female'
+              AND cd.new_is_currently_present = 1
+              AND (:q = '' OR cd.name ILIKE '%' || :q || '%' OR cd.tag_number ILIKE '%' || :q || '%')
+            ORDER BY cd.tag_number
+        """),
+        {"q": q or ""},
+    )
+    rows = result.fetchall()
+    return [
+        GenealogyCattle(
+            tag_number=row[0], name=row[1], gender=row[2], animal_type=row[3],
+            acquisition_type=row[4], date_of_birth=row[5], is_present=row[6],
+            is_milking=row[7], is_pregnant=row[8], mother_tag_number=row[9],
+            father_tag_number=row[10],
+        )
+        for row in rows
+    ]
+
+
 @app.get("/cattle/{tag_number}", response_model=CattleProfileApiResponse)
 async def get_cattle_profile(
     tag_number: str,
@@ -361,6 +530,74 @@ async def get_genealogy_all():
             raise HTTPException(status_code=404, detail="Geneology data missing error")
         r.setex("all_genealogy", 3600 * 24, json.dumps(cattle_list))
         return cattle_list or []
+
+
+@app.get("/genealogy/fathers", response_model=List[GenealogyCattle])
+async def get_genealogy_fathers(session: AsyncSession = Depends(get_session)):
+    """Father lineage: all cattle whose father is a BULL, plus top-level bull fathers as roots."""
+    result = await session.execute(
+        text("""
+            WITH bull_fathers AS (
+                SELECT
+                    cd.tag_number,
+                    cd.name
+                FROM cattle_data cd
+                WHERE cd.animal_type = 'BULL'
+                  AND cd.tag_number IN (
+                      SELECT DISTINCT father_tag_number FROM cattle_data
+                      WHERE father_tag_number IS NOT NULL AND father_tag_number != ''
+                  )
+            ),
+            children AS (
+                SELECT
+                    cd.name,
+                    cd.tag_number,
+                    cd.father_name,
+                    cd.father_tag_number,
+                    cd.gender,
+                    cd.animal_type,
+                    cd.acquisition_type,
+                    cd.date_of_birth::text AS date_of_birth,
+                    cd.new_is_currently_present AS is_present,
+                    cd.new_is_currenlty_milking AS is_milking,
+                    cd.new_is_currently_pregnant AS is_pregnant,
+                    cd.mother_tag_number
+                FROM cattle_data cd
+                WHERE cd.father_tag_number IN (
+                    SELECT tag_number FROM cattle_data WHERE cattle_data.animal_type = 'BULL'
+                )
+                  AND COALESCE(cd.animal_type, '') NOT IN ('BULL')
+            )
+            SELECT
+                name, tag_number, father_name, father_tag_number,
+                gender, animal_type, acquisition_type, date_of_birth,
+                is_present, is_milking, is_pregnant, mother_tag_number
+            FROM (
+                SELECT
+                    bf.name, bf.tag_number, NULL::text AS father_name, NULL::text AS father_tag_number,
+                    'Male' AS gender, 'BULL' AS animal_type, NULL::text AS acquisition_type, NULL::text AS date_of_birth,
+                    1 AS is_present, 0 AS is_milking, 0 AS is_pregnant, NULL::text AS mother_tag_number
+                FROM bull_fathers bf
+                UNION ALL
+                SELECT
+                    c.name, c.tag_number, c.father_name, c.father_tag_number,
+                    c.gender, c.animal_type, c.acquisition_type, c.date_of_birth,
+                    c.is_present, c.is_milking, c.is_pregnant, c.mother_tag_number
+                FROM children c
+            ) combined
+            ORDER BY father_tag_number NULLS FIRST, name
+        """)
+    )
+    rows = result.fetchall()
+    return [
+        GenealogyCattle(
+            tag_number=row[1], name=row[0], gender=row[4], animal_type=row[5],
+            acquisition_type=row[6], date_of_birth=row[7], is_present=row[8],
+            is_milking=row[9], is_pregnant=row[10], mother_tag_number=row[11],
+            father_tag_number=row[3],
+        )
+        for row in rows
+    ]
 
 
 @app.get("/donations/donated-out", response_model=List[DonatedCattleRecord])

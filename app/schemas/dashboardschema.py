@@ -19,6 +19,26 @@ class Top10Milkingcattle(BaseModel):
     total_milk: int | None
 
 
+class TopCurrentMonthMilker(BaseModel):
+    tag_number: str
+    name: str
+    total_milk: float
+    avg_milk: float | None = None
+    days_logged: int | None = None
+    gender: str | None = None
+    animal_type: str | None = None
+
+
+class BottomCurrentMonthMilker(BaseModel):
+    tag_number: str
+    name: str
+    total_milk: float
+    avg_milk: float | None = None
+    days_logged: int | None = None
+    gender: str | None = None
+    animal_type: str | None = None
+
+
 class Top10Fitcattle(BaseModel):
     tag_number: str | None
     name: str | None
