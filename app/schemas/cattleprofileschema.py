@@ -65,3 +65,59 @@ class CattleProfileApiResponse(BaseModel):
     overview: Overview | None = None
     milk_logs: list[MilkLog]
     family_tree: FamilyTree | None = None
+
+
+class TimelineBull(BaseModel):
+    tag_number: str | None = None
+    name: str | None = None
+
+
+class TimelineChild(BaseModel):
+    tag_number: str
+    name: str | None = None
+    birth_date: str | None = None
+    gender: str | None = None
+    animal_type: str | None = None
+
+
+class ConceptionEvent(BaseModel):
+    id: int
+    conception_date: str | None = None
+    birth_date: str | None = None
+    gestation_days: int | None = None
+    bull: TimelineBull | None = None
+    child: TimelineChild | None = None
+    is_ongoing: bool = False
+
+
+class TimelineMilkPoint(BaseModel):
+    date: str
+    milk: float
+
+
+class WeightRecord(BaseModel):
+    date: str
+    weight: float
+
+
+class WeightTimelineResponse(BaseModel):
+    tag_number: str
+    name: str | None = None
+    date_of_birth: str | None = None
+    current_weight: float | None = None
+    average_weight: float | None = None
+    max_weight: float | None = None
+    min_weight: float | None = None
+    records: list[WeightRecord] = []
+
+
+class ReproductionTimelineResponse(BaseModel):
+    tag_number: str
+    name: str | None = None
+    gender: str | None = None
+    cattle_dob: str | None = None
+    bull: TimelineBull | None = None
+    events: list[ConceptionEvent] = []
+    children: list[TimelineChild] = []
+    milk_monthly: list[TimelineMilkPoint] = []
+    milk_daily: list[TimelineMilkPoint] = []

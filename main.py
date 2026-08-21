@@ -24,7 +24,16 @@ from app.schemas.dashboardschema import (
     TopCurrentMonthMilker,
     BottomCurrentMonthMilker,
 )
-from app.schemas.cattleprofileschema import CattleProfileApiResponse
+from app.schemas.cattleprofileschema import (
+    CattleProfileApiResponse,
+    ReproductionTimelineResponse,
+    ConceptionEvent,
+    TimelineBull,
+    TimelineChild,
+    TimelineMilkPoint,
+    WeightTimelineResponse,
+    WeightRecord,
+)
 from app.schemas.presentcattleschema import PresentCattleModel
 from app.schemas.genealogyschema import GenealogyCattle
 from app.schemas.donatedoutschema import DonatedCattleRecord
@@ -473,6 +482,271 @@ async def get_cow_mothers(q: str = "", session: AsyncSession = Depends(get_sessi
         )
         for row in rows
     ]
+
+
+@app.get("/cattle/{tag_number}/reproduction-timeline", response_model=ReproductionTimelineResponse)
+async def get_reproduction_timeline(
+    tag_number: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Reproduction timeline: conceptions, bulls, births, children and milk production."""
+    # 1. Cattle overview
+    cow = await session.execute(
+        text("""
+            SELECT tag_number, name, gender, date_of_birth::text
+            FROM cattle_data
+            WHERE tag_number = :tag
+        """),
+        {"tag": tag_number},
+    )
+    cow_row = cow.fetchone()
+    if cow_row is None:
+        raise HTTPException(status_code=404, detail="Cattle not found")
+
+    # 2. All children of this cattle with their father
+    children_res = await session.execute(
+        text("""
+            SELECT c.tag_number, c.name, c.date_of_birth::text, c.gender, c.animal_type,
+                   c.father_tag_number, f.name AS father_name
+            FROM cattle_data c
+            LEFT JOIN cattle_data f ON f.tag_number = c.father_tag_number
+            WHERE c.mother_tag_number = :tag
+            ORDER BY c.date_of_birth NULLS LAST
+        """),
+        {"tag": tag_number},
+    )
+    child_rows = children_res.fetchall()
+    children = [
+        TimelineChild(
+            tag_number=r[0], name=r[1], birth_date=_safe_iso_date(r[2]),
+            gender=r[3], animal_type=r[4],
+        )
+        for r in child_rows
+    ]
+
+    # 3. Pregnancy / conception logs
+    preg_res = await session.execute(
+        text("""
+            SELECT id, conception_date, birth_date
+            FROM cattle_pragnancies_logs
+            WHERE tag_number = :tag
+            ORDER BY id
+        """),
+        {"tag": tag_number},
+    )
+    preg_rows = preg_res.fetchall()
+
+    # 4. Milk production
+    milk_month_res = await session.execute(
+        text("""
+            SELECT TO_CHAR(date, 'YYYY-MM') AS month, ROUND(SUM(milk)::numeric, 1) AS total
+            FROM cattle_milk_logs
+            WHERE tag_number = :tag
+            GROUP BY TO_CHAR(date, 'YYYY-MM')
+            ORDER BY month
+        """),
+        {"tag": tag_number},
+    )
+    milk_daily_res = await session.execute(
+        text("""
+            SELECT date::text, milk
+            FROM cattle_milk_logs
+            WHERE tag_number = :tag
+            ORDER BY date DESC
+            LIMIT 60
+        """),
+        {"tag": tag_number},
+    )
+
+    # Build index of children by their birth date (ISO) -> child tag + father info
+    child_by_birth: dict[str, list[dict]] = {}
+    for r in child_rows:
+        birth_iso = _safe_iso_date(r[2])
+        if birth_iso:
+            child_by_birth.setdefault(birth_iso, []).append(
+                {"tag": r[0], "name": r[1], "father_tag": r[5], "father_name": r[6]}
+            )
+
+    events = []
+    for pr in preg_rows:
+        pid, conc_raw, birth_raw = pr[0], pr[1], pr[2]
+        conc_iso = _safe_iso_date(conc_raw)
+        birth_iso = _safe_iso_date(birth_raw)
+        gestation_days = None
+        if conc_iso and birth_iso:
+            try:
+                d0 = _date(conc_iso)
+                d1 = _date(birth_iso)
+                if d1 >= d0:
+                    gestation_days = (d1 - d0).days
+            except Exception:
+                pass
+
+        child = None
+        bull = None
+        cands = child_by_birth.get(birth_iso) if birth_iso else None
+        if cands:
+            c = cands.pop(0)
+            child = TimelineChild(
+                tag_number=c["tag"], name=c["name"], birth_date=birth_iso,
+            )
+            bull = _resolve_bull(c["father_tag"], c["father_name"])
+
+        events.append(
+            ConceptionEvent(
+                id=pid,
+                conception_date=conc_iso,
+                birth_date=birth_iso,
+                gestation_days=gestation_days,
+                bull=bull,
+                child=child,
+                is_ongoing=(birth_iso is None and conc_iso is not None),
+            )
+        )
+
+    # 5. Current / primary bull for the cattle (fallback bubble)
+    bull = None
+    for e in events:
+        if e.bull and e.bull.tag_number:
+            bull = e.bull
+            break
+    if bull is None and str(cow_row[2] or "").lower() == "male":
+        bull = TimelineBull(tag_number=cow_row[0], name=cow_row[1])
+
+    return ReproductionTimelineResponse(
+        tag_number=cow_row[0],
+        name=cow_row[1],
+        gender=cow_row[2],
+        cattle_dob=_safe_iso_date(cow_row[3]),
+        bull=bull,
+        events=events,
+        children=children,
+        milk_monthly=[
+            TimelineMilkPoint(date=r[0], milk=float(r[1] or 0)) for r in milk_month_res.fetchall()
+        ],
+        milk_daily=[
+            TimelineMilkPoint(date=r[0], milk=float(r[1] or 0)) for r in milk_daily_res.fetchall()
+        ],
+    )
+
+
+def _resolve_bull(father_tag: str | None, father_name: str | None) -> TimelineBull | None:
+    """Resolve a father tag/name into a bull bubble."""
+    if father_name:
+        return TimelineBull(tag_number=father_tag, name=father_name)
+    if father_tag:
+        return TimelineBull(tag_number=father_tag, name=father_tag)
+    return None
+
+
+def _safe_iso_date(value: str | None) -> str | None:
+    """Normalize the many date formats in the DB into YYYY-MM-DD, or None."""
+    if not value:
+        return None
+    s = str(value).strip()
+    if s in ("None", "-", "", "null"):
+        return None
+    # Already ISO (YYYY-MM-DD [HH:MM:SS])
+    import re
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T]|$)", s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    # Weekday Mon DD HH:MM:SS TZ YYYY  (e.g. "Fri Apr 01 00:00:00 IST 2011")
+    m = re.match(r"^\w{3}\s+([A-Za-z]{3})\s+(\d{1,2})[\s:].*?(\d{4})$", s)
+    if m:
+        mon_raw, day, year_raw = m.group(1), m.group(2), m.group(3)
+        months = {
+            "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+        }
+        mon = months.get(mon_raw.lower())
+        if mon:
+            try:
+                return f"{int(year_raw):04d}-{mon:02d}-{int(day):02d}"
+            except Exception:
+                return None
+    # DD-Mon-YY  /  DD-MM-YYYY  /  DD-Mon-YYYY  /  DD-MM-YY
+    months = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+    m = re.match(r"^(\d{1,2})[-/]([A-Za-z]+|\d{1,2})[-/](\d{2,4})$", s)
+    if m:
+        day = int(m.group(1))
+        mon_raw = m.group(2)
+        year_raw = m.group(3)
+        if mon_raw.lower() in months:
+            mon = months[mon_raw.lower()]
+        elif mon_raw.isdigit():
+            mon = int(mon_raw)
+        else:
+            return None
+        year = int(year_raw)
+        if year < 100:
+            year += 2000
+        try:
+            d = _date(f"{year:04d}-{mon:02d}-{day:02d}")
+            return d.isoformat()
+        except Exception:
+            return None
+    return None
+
+
+def _date(iso: str):
+    from datetime import date, datetime
+    try:
+        return datetime.strptime(iso, "%Y-%m-%d").date()
+    except Exception:
+        return date(1900, 1, 1)
+
+
+@app.get("/cattle/{tag_number}/weight-timeline", response_model=WeightTimelineResponse)
+async def get_weight_timeline(
+    tag_number: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Weight history for a cattle from the new_weight_record table."""
+    name_res = await session.execute(
+        text("""
+            SELECT name, date_of_birth
+            FROM new_weight_record
+            WHERE tag_number = :tag
+            LIMIT 1
+        """),
+        {"tag": tag_number},
+    )
+    name_row = name_res.fetchone()
+
+    # Dedupe by month taking the max recorded weight, ignore zeroes
+    records = await session.execute(
+        text("""
+            SELECT months::text AS date, MAX(weights)::real AS weight
+            FROM new_weight_record
+            WHERE tag_number = :tag AND weights > 0
+            GROUP BY months
+            ORDER BY months
+        """),
+        {"tag": tag_number},
+    )
+    rows = records.fetchall()
+    recs = [WeightRecord(date=r[0], weight=float(r[1])) for r in rows]
+
+    weights = [r.weight for r in recs]
+    current = weights[-1] if weights else None
+    avg = round(sum(weights) / len(weights), 1) if weights else None
+    max_w = max(weights) if weights else None
+    min_w = min(weights) if weights else None
+
+    return WeightTimelineResponse(
+        tag_number=tag_number,
+        name=name_row[0] if name_row else None,
+        date_of_birth=_safe_iso_date(name_row[1]) if name_row else None,
+        current_weight=current,
+        average_weight=avg,
+        max_weight=max_w,
+        min_weight=min_w,
+        records=recs,
+    )
 
 
 @app.get("/cattle/{tag_number}", response_model=CattleProfileApiResponse)
