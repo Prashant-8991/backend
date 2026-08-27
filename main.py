@@ -33,6 +33,12 @@ from app.schemas.cattleprofileschema import (
     TimelineMilkPoint,
     WeightTimelineResponse,
     WeightRecord,
+    CattleDrillDownResponse,
+    CattleDrillDetailResponse,
+    DrillDownSection,
+    DrillDownRecord,
+    DrillDetailRecord,
+    PhysicalMark,
 )
 from app.schemas.presentcattleschema import PresentCattleModel
 from app.schemas.genealogyschema import GenealogyCattle
@@ -746,6 +752,260 @@ async def get_weight_timeline(
         max_weight=max_w,
         min_weight=min_w,
         records=recs,
+    )
+
+
+DEFAULT_DRILL_TAGS = [
+    "SOM-006", "SOM-015", "SOM-020", "SOM-023", "SOM-025", "SOM-038", "SOM-040", "SOM-041",
+    "SOM-055", "SOM-061", "SOM-068", "SOM-085", "SOM-087", "SOM-089", "SOM-091", "SOM-103",
+    "SOM-115", "SOM-119", "SOM-125", "SOM-136", "SOM-220", "SOM-060", "SOM-112", "SOM-150",
+    "SOM-159", "SOM-161", "SOM-162", "SOM-169", "SOM-179", "SOM-203",
+]
+
+
+@app.get("/cattle-drill-down", response_model=CattleDrillDownResponse)
+async def get_cattle_drill_down(
+    tags: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    if tags:
+        raw = [t.strip() for t in tags.split(",") if t.strip()]
+        seen = {}
+        for t in raw:
+            if t not in seen:
+                seen[t] = True
+        tag_list = list(seen.keys())
+    else:
+        tag_list = DEFAULT_DRILL_TAGS
+
+    seen = {}
+    for t in tag_list:
+        if t not in seen:
+            seen[t] = True
+    tag_list = list(seen.keys())
+
+    if not tag_list:
+        return CattleDrillDownResponse(
+            mother=DrillDownSection(records=[]),
+            maternal_aunt=DrillDownSection(records=[]),
+        )
+
+    placeholders = ", ".join([f":t{i}" for i in range(len(tag_list))])
+    params = {f"t{i}": tag for i, tag in enumerate(tag_list)}
+    result = await session.execute(
+        text(f"SELECT tag_number, mother_tag_number FROM cattle_data WHERE tag_number IN ({placeholders})"),
+        params,
+    )
+    mother_tags = set()
+    for row in result.fetchall():
+        mt = row[1]
+        if mt and str(mt).strip():
+            mother_tags.add(str(mt).strip())
+
+    aunt_tags: set[str] = set()
+    for mt in list(mother_tags):
+        gm_res = await session.execute(
+            text("SELECT mother_tag_number FROM cattle_data WHERE tag_number = :mt"),
+            {"mt": mt},
+        )
+        gm = gm_res.scalar()
+        if gm and str(gm).strip():
+            gm = str(gm).strip()
+            aunts_res = await session.execute(
+                text("SELECT tag_number FROM cattle_data WHERE mother_tag_number = :gm AND tag_number != :mt"),
+                {"gm": gm, "mt": mt},
+            )
+            for r in aunts_res.fetchall():
+                at = r[0]
+                if at and str(at).strip():
+                    aunt_tags.add(str(at).strip())
+
+    async def build_records(tag_set: set[str]) -> list[DrillDownRecord]:
+        records: list[DrillDownRecord] = []
+        for atag in sorted(tag_set):
+            info = await session.execute(
+                text("SELECT name, tag_number FROM cattle_data WHERE tag_number = :t"),
+                {"t": atag},
+            )
+            row = info.fetchone()
+            if not row:
+                continue
+            name, tag_number = row[0], row[1]
+            avg_res = await session.execute(
+                text("SELECT ROUND(AVG(milk)::numeric, 1) FROM cattle_milk_logs WHERE tag_number = :t"),
+                {"t": tag_number},
+            )
+            avg_milk = avg_res.scalar()
+            avg_val = float(avg_milk) if avg_milk is not None else None
+            phys_res = await session.execute(
+                text("""
+                    SELECT hip_width, head, ear, eye, muzzle, horn, skin, tail, hump, udder, teat, dewlap, milk_vein
+                    FROM cattle_physical_logs WHERE tag_number = :t ORDER BY id DESC LIMIT 1
+                """),
+                {"t": tag_number},
+            )
+            prow = phys_res.fetchone()
+            pm = None
+            if prow:
+                pm = PhysicalMark(
+                    hip_width=str(prow[0]) if prow[0] is not None else None,
+                    head=float(prow[1]) if prow[1] is not None else None,
+                    ear=float(prow[2]) if prow[2] is not None else None,
+                    eye=float(prow[3]) if prow[3] is not None else None,
+                    muzzle=float(prow[4]) if prow[4] is not None else None,
+                    horn=float(prow[5]) if prow[5] is not None else None,
+                    skin=float(prow[6]) if prow[6] is not None else None,
+                    tail=float(prow[7]) if prow[7] is not None else None,
+                    hump=float(prow[8]) if prow[8] is not None else None,
+                    udder=float(prow[9]) if prow[9] is not None else None,
+                    teat=float(prow[10]) if prow[10] is not None else None,
+                    dewlap=float(prow[11]) if prow[11] is not None else None,
+                    milk_vein=float(prow[12]) if prow[12] is not None else None,
+                )
+            records.append(DrillDownRecord(name=name, tag_number=tag_number, average_milk=avg_val, physical_mark=pm))
+        return records
+
+    mother_records = await build_records(mother_tags)
+    aunt_records = await build_records(aunt_tags)
+
+    return CattleDrillDownResponse(
+        mother=DrillDownSection(records=mother_records),
+        maternal_aunt=DrillDownSection(records=aunt_records),
+    )
+
+
+@app.get("/cattle/drill-tags")
+async def get_drill_tags(session: AsyncSession = Depends(get_session)):
+    placeholders = ", ".join([f":t{i}" for i in range(len(DEFAULT_DRILL_TAGS))])
+    params = {f"t{i}": tag for i, tag in enumerate(DEFAULT_DRILL_TAGS)}
+    result = await session.execute(
+        text(f"SELECT tag_number, name FROM cattle_data WHERE tag_number IN ({placeholders}) ORDER BY tag_number"),
+        params,
+    )
+    rows = result.fetchall()
+    tag_map = {r[0]: r[1] for r in rows}
+    return [{"tag_number": t, "name": tag_map.get(t)} for t in DEFAULT_DRILL_TAGS]
+
+
+@app.get("/cattle/{tag_number}/maternal-drill", response_model=CattleDrillDetailResponse)
+async def get_cattle_maternal_drill(
+    tag_number: str,
+    session: AsyncSession = Depends(get_session),
+):
+    async def build_detail(tag: str) -> DrillDetailRecord | None:
+        info = await session.execute(
+            text("SELECT name, tag_number, date_of_birth FROM cattle_data WHERE tag_number = :t"),
+            {"t": tag},
+        )
+        row = info.fetchone()
+        if not row:
+            return None
+        name, tnum, dob = row[0], row[1], row[2]
+        avg_res = await session.execute(
+            text("SELECT ROUND(AVG(milk)::numeric, 1) FROM cattle_milk_logs WHERE tag_number = :t"),
+            {"t": tnum},
+        )
+        avg_milk = avg_res.scalar()
+        avg_val = float(avg_milk) if avg_milk is not None else None
+        phys_res = await session.execute(
+            text("""
+                SELECT hip_width, head, ear, eye, muzzle, horn, skin, tail, hump, udder, teat, dewlap, milk_vein
+                FROM cattle_physical_logs WHERE tag_number = :t ORDER BY id DESC LIMIT 1
+            """),
+            {"t": tnum},
+        )
+        prow = phys_res.fetchone()
+        pm = None
+        total = None
+        if prow:
+            vals = [prow[1], prow[2], prow[3], prow[4], prow[5], prow[6], prow[7], prow[8], prow[9], prow[10], prow[11], prow[12]]
+            has = any(v is not None for v in vals)
+            if has:
+                total = round(sum(v for v in vals if v is not None), 1)
+            pm = PhysicalMark(
+                hip_width=str(prow[0]) if prow[0] is not None else None,
+                head=float(prow[1]) if prow[1] is not None else None,
+                ear=float(prow[2]) if prow[2] is not None else None,
+                eye=float(prow[3]) if prow[3] is not None else None,
+                muzzle=float(prow[4]) if prow[4] is not None else None,
+                horn=float(prow[5]) if prow[5] is not None else None,
+                skin=float(prow[6]) if prow[6] is not None else None,
+                tail=float(prow[7]) if prow[7] is not None else None,
+                hump=float(prow[8]) if prow[8] is not None else None,
+                udder=float(prow[9]) if prow[9] is not None else None,
+                teat=float(prow[10]) if prow[10] is not None else None,
+                dewlap=float(prow[11]) if prow[11] is not None else None,
+                milk_vein=float(prow[12]) if prow[12] is not None else None,
+            )
+        return DrillDetailRecord(
+            name=name,
+            tag_number=tnum,
+            date_of_birth=str(dob) if dob else None,
+            average_milk=avg_val,
+            physical_mark=pm,
+            physical_total=total,
+        )
+
+    cattle = await build_detail(tag_number)
+    if not cattle:
+        raise HTTPException(status_code=404, detail="Cattle not found")
+
+    mother_tag_res = await session.execute(
+        text("SELECT mother_tag_number FROM cattle_data WHERE tag_number = :t"),
+        {"t": tag_number},
+    )
+    mother_tag = mother_tag_res.scalar()
+    mother_tag = str(mother_tag).strip() if mother_tag and str(mother_tag).strip() else None
+
+    mother = await build_detail(mother_tag) if mother_tag else None
+
+    sisters: list[DrillDetailRecord] = []
+    if mother_tag:
+        sis_res = await session.execute(
+            text("""
+                SELECT tag_number FROM cattle_data
+                WHERE mother_tag_number = :mt AND tag_number != :self
+                  AND lower(gender) = 'female' AND new_is_currently_present = 1
+                ORDER BY tag_number
+            """),
+            {"mt": mother_tag, "self": tag_number},
+        )
+        for r in sis_res.fetchall():
+            sd = await build_detail(r[0])
+            if sd:
+                sisters.append(sd)
+
+    maternal_grandmother = None
+    maternal_aunts: list[DrillDetailRecord] = []
+    if mother_tag:
+        gm_res = await session.execute(
+            text("SELECT mother_tag_number FROM cattle_data WHERE tag_number = :mt"),
+            {"mt": mother_tag},
+        )
+        gm_tag = gm_res.scalar()
+        gm_tag = str(gm_tag).strip() if gm_tag and str(gm_tag).strip() else None
+        if gm_tag:
+            maternal_grandmother = await build_detail(gm_tag)
+            aunts_res = await session.execute(
+                text("""
+                    SELECT tag_number FROM cattle_data
+                    WHERE mother_tag_number = :gm AND tag_number != :mt
+                      AND lower(gender) = 'female' AND new_is_currently_present = 1
+                    ORDER BY tag_number
+                """),
+                {"gm": gm_tag, "mt": mother_tag},
+            )
+            for r in aunts_res.fetchall():
+                ad = await build_detail(r[0])
+                if ad:
+                    maternal_aunts.append(ad)
+
+    return CattleDrillDetailResponse(
+        cattle=cattle,
+        mother=mother,
+        sisters=sisters,
+        maternal_grandmother=maternal_grandmother,
+        maternal_aunts=maternal_aunts,
     )
 
 

@@ -121,3 +121,54 @@ class ReproductionTimelineResponse(BaseModel):
     children: list[TimelineChild] = []
     milk_monthly: list[TimelineMilkPoint] = []
     milk_daily: list[TimelineMilkPoint] = []
+
+
+class PhysicalMark(BaseModel):
+    hip_width: str | None = None
+    head: float | None = None
+    ear: float | None = None
+    eye: float | None = None
+    muzzle: float | None = None
+    horn: float | None = None
+    skin: float | None = None
+    tail: float | None = None
+    hump: float | None = None
+    udder: float | None = None
+    teat: float | None = None
+    dewlap: float | None = None
+    milk_vein: float | None = None
+
+
+class DrillDownRecord(BaseModel):
+    name: str | None = None
+    tag_number: str
+    average_milk: float | None = None
+    physical_mark: PhysicalMark | None = None
+
+
+class DrillDownSection(BaseModel):
+    tag_number: str | None = None
+    name: str | None = None
+    records: list[DrillDownRecord] = []
+
+
+class CattleDrillDownResponse(BaseModel):
+    mother: DrillDownSection
+    maternal_aunt: DrillDownSection
+
+
+class DrillDetailRecord(BaseModel):
+    name: str | None = None
+    tag_number: str
+    date_of_birth: str | None = None
+    average_milk: float | None = None
+    physical_mark: PhysicalMark | None = None
+    physical_total: float | None = None
+
+
+class CattleDrillDetailResponse(BaseModel):
+    cattle: DrillDetailRecord | None = None
+    mother: DrillDetailRecord | None = None
+    sisters: list[DrillDetailRecord] = []
+    maternal_grandmother: DrillDetailRecord | None = None
+    maternal_aunts: list[DrillDetailRecord] = []
