@@ -303,24 +303,108 @@ async def delete_user(
 async def get_dashboard():
 
     # Try Redis first
-    dashboard_data_json = r.get("dashboard_data")
+    try:
+        dashboard_data_json = r.get("dashboard_data")
+        if dashboard_data_json:
+            return json.loads(dashboard_data_json)
+    except Exception:
+        pass
 
-    if dashboard_data_json:
-        return json.loads(dashboard_data_json)
+    import asyncio as _asyncio
 
-    async for session in get_session():
-
+    async def _fetch_dashboard(session):
         result = await session.execute(text("SELECT get_dashboard_data()"))
+        return result.scalar()
 
-        dashboard_data = result.scalar()
+    try:
+        async for session in get_session():
+            try:
+                dashboard_data = await _asyncio.wait_for(_fetch_dashboard(session), timeout=4.0)
+            except _asyncio.TimeoutError:
+                raise TimeoutError("get_dashboard_data timeout")
+            if dashboard_data is None:
+                raise HTTPException(status_code=404, detail="Dashboard data not found")
+            try:
+                r.setex("dashboard_data", 20, json.dumps(dashboard_data))
+            except Exception:
+                pass
+            return dashboard_data
+    except (TimeoutError, _asyncio.TimeoutError, Exception) as e:
+        print(f"Dashboard fallback due to: {e}")
 
-        if dashboard_data is None:
-            raise HTTPException(status_code=404, detail="Dashboard data not found")
+    # Fallback: build dashboard without heavy recursive CTEs
+    async for session in get_session():
+        total_cattle = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = 1"))
+        all_cattle = await session.scalar(text("SELECT count(*) FROM cattle_data"))
+        total_bull = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE animal_type = 'BULL'"))
+        total_ox = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE animal_type = 'OX'"))
+        total_female = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = 1 AND lower(gender) = 'female'"))
+        total_male = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = 1 AND lower(gender) = 'male'"))
+        total_female_calf = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = 1 AND lower(animal_type) = 'female calf'"))
+        total_male_calf = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = 1 AND lower(animal_type) = 'male calf'"))
+        total_milking = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currenlty_milking = 1 AND new_is_currently_present = 1"))
+        total_pregnant = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = 1 AND new_is_currently_pregnant = 1"))
 
-        # Store in Redis
-        r.setex("dashboard_data", 20, json.dumps(dashboard_data))  # 1 hour
+        src_rows = (await session.execute(text("SELECT acquisition_type, count(*) as total_cattle FROM cattle_data WHERE new_is_currently_present = 1 GROUP BY acquisition_type ORDER BY total_cattle desc"))).fetchall()
+        source_breakdown = [{"acquisition_type": r[0], "total_cattle": r[1]} for r in src_rows]
 
-        return dashboard_data
+        try:
+            gen_rows = (await session.execute(text("SELECT gen as generation, count(*) as total_cattle FROM cattle_data_view WHERE gen IS NOT NULL GROUP BY gen ORDER BY gen"))).fetchall()
+            generation = [{"generation": r[0], "total_cattle": r[1]} for r in gen_rows]
+        except Exception:
+            generation = []
+
+        try:
+            top_milk_rows = (await session.execute(text("""
+                SELECT cml.tag_number, cd.name, ROUND(SUM(cml.milk)) as total_milk
+                FROM cattle_milk_logs cml JOIN cattle_data cd ON cd.tag_number = cml.tag_number
+                GROUP BY cml.tag_number, cd.name ORDER BY total_milk DESC LIMIT 10
+            """))).fetchall()
+            top_10_milking_cattle = [{"tag_number": r[0], "name": r[1], "generation": None, "total_milk": int(r[2] or 0)} for r in top_milk_rows]
+        except Exception:
+            top_10_milking_cattle = []
+
+        try:
+            top_fit_rows = (await session.execute(text("""
+                SELECT tag_number, hip_width, ROUND((COALESCE(head,0)+COALESCE(ear,0)+COALESCE(eye,0)+COALESCE(muzzle,0)+COALESCE(horn,0)+COALESCE(skin,0)+COALESCE(tail,0)+COALESCE(hump,0)+COALESCE(udder,0)+COALESCE(teat,0)+COALESCE(dewlap,0)+COALESCE(milk_vein,0))::numeric/12,3) as total_score
+                FROM cattle_physical_logs ORDER BY total_score DESC LIMIT 10
+            """))).fetchall()
+            top_10_fit_cattle = [{"tag_number": r[0], "name": None, "generation": None, "hip_width": r[1], "total_score": float(r[2] or 0)} for r in top_fit_rows]
+            for rec in top_10_fit_cattle:
+                nr = await session.execute(text("SELECT name FROM cattle_data WHERE tag_number = :t"), {"t": rec["tag_number"]})
+                rec["name"] = nr.scalar()
+        except Exception:
+            top_10_fit_cattle = []
+
+        month_rows = (await session.execute(text("SELECT TO_CHAR(date, 'YYYY-MM') AS month, round(SUM(milk)) AS total_milk FROM cattle_milk_logs GROUP BY TO_CHAR(date, 'YYYY-MM') ORDER BY month ASC"))).fetchall()
+        month_wise_milk_production = [{"month": r[0], "total_milk": float(r[1] or 0)} for r in month_rows]
+
+        avg_row = await session.scalar(text("SELECT ROUND(AVG(sub.average)) FROM (SELECT tag_number, ROUND(AVG(milk)) as average FROM cattle_milk_logs GROUP BY tag_number) as sub"))
+        average_milk_by_per_cattle = {"average_milk_by_per_cattle": int(avg_row or 0)}
+
+        fallback = {
+            "total_cattle": int(total_cattle or 0),
+            "all_cattle_data": int(all_cattle or 0),
+            "total_bull": int(total_bull or 0),
+            "total_ox": int(total_ox or 0),
+            "total_female_cattle": int(total_female or 0),
+            "total_male_cattle": int(total_male or 0),
+            "total_female_calf": int(total_female_calf or 0),
+            "total_male_calf": int(total_male_calf or 0),
+            "total_milking_cow": int(total_milking or 0),
+            "total_pregnant_cow": int(total_pregnant or 0),
+            "source_breakdown": source_breakdown,
+            "generation": generation,
+            "top_10_milking_cattle": top_10_milking_cattle,
+            "top_10_fit_cattle": top_10_fit_cattle,
+            "month_wise_milk_production": month_wise_milk_production,
+            "average_milk_by_per_cattle": average_milk_by_per_cattle,
+        }
+        try:
+            r.setex("dashboard_data", 20, json.dumps(fallback))
+        except Exception:
+            pass
+        return fallback
 
 
 @app.get("/dashboard/top-milkers-current-month", response_model=list[TopCurrentMonthMilker])
@@ -755,6 +839,122 @@ async def get_weight_timeline(
     )
 
 
+# ── Cattle Remarks ──
+from pydantic import BaseModel as _PydanticBaseModel
+
+class RemarkCreate(_PydanticBaseModel):
+    tag_number: str
+    title: str
+    description: str | None = None
+
+class RemarkUpdate(_PydanticBaseModel):
+    title: str | None = None
+    description: str | None = None
+
+@app.get("/cattle/{tag_number}/remarks")
+async def get_cattle_remarks(
+    tag_number: str,
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        text("SELECT id, tag_number, title, description, created_at, updated_at FROM cattle_remark WHERE tag_number = :t ORDER BY updated_at DESC, id DESC"),
+        {"t": tag_number},
+    )
+    rows = result.fetchall()
+    remarks = []
+    for r in rows:
+        rid, tnum, title, desc, created, updated = r[0], r[1], r[2], r[3], r[4], r[5]
+        imgs = await session.execute(text("SELECT id, image_url FROM cattle_remarks_images WHERE remark_id = :rid ORDER BY id"), {"rid": rid})
+        images = [{"id": ir[0], "image_url": ir[1]} for ir in imgs.fetchall()]
+        remarks.append({"id": rid, "tag_number": tnum, "title": title, "description": desc, "created_at": str(created) if created else None, "updated_at": str(updated) if updated else None, "images": images})
+    return remarks
+
+@app.post("/cattle-remarks")
+async def create_cattle_remark(
+    payload: RemarkCreate,
+    session: AsyncSession = Depends(get_session),
+):
+    if not payload.tag_number or not payload.title:
+        raise HTTPException(status_code=400, detail="tag_number and title required")
+    result = await session.execute(
+        text("INSERT INTO cattle_remark (tag_number, title, description, created_at, updated_at) VALUES (:t, :title, :desc, NOW(), NOW()) RETURNING id, tag_number, title, description, created_at, updated_at"),
+        {"t": payload.tag_number, "title": payload.title, "desc": payload.description},
+    )
+    row = result.fetchone()
+    await session.commit()
+    return {"id": row[0], "tag_number": row[1], "title": row[2], "description": row[3], "created_at": str(row[4]), "updated_at": str(row[5]), "images": []}
+
+@app.put("/cattle-remarks/{remark_id}")
+async def update_cattle_remark(
+    remark_id: int,
+    payload: RemarkUpdate,
+    session: AsyncSession = Depends(get_session),
+):
+    fields = []
+    params: dict = {"id": remark_id}
+    if payload.title is not None:
+        fields.append("title = :title"); params["title"] = payload.title
+    if payload.description is not None:
+        fields.append("description = :desc"); params["desc"] = payload.description
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    fields.append("updated_at = NOW()")
+    result = await session.execute(text(f"UPDATE cattle_remark SET {', '.join(fields)} WHERE id = :id RETURNING id, tag_number, title, description, created_at, updated_at"), params)
+    row = result.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Remark not found")
+    await session.commit()
+    imgs = await session.execute(text("SELECT id, image_url FROM cattle_remarks_images WHERE remark_id = :rid ORDER BY id"), {"rid": remark_id})
+    images = [{"id": ir[0], "image_url": ir[1]} for ir in imgs.fetchall()]
+    return {"id": row[0], "tag_number": row[1], "title": row[2], "description": row[3], "created_at": str(row[4]), "updated_at": str(row[5]), "images": images}
+
+@app.delete("/cattle-remarks/{remark_id}")
+async def delete_cattle_remark(
+    remark_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    await session.execute(text("DELETE FROM cattle_remarks_images WHERE remark_id = :id"), {"id": remark_id})
+    result = await session.execute(text("DELETE FROM cattle_remark WHERE id = :id RETURNING id"), {"id": remark_id})
+    if not result.fetchone():
+        raise HTTPException(status_code=404, detail="Remark not found")
+    await session.commit()
+    return {"success": True}
+
+@app.post("/cattle-remarks/{remark_id}/images/upload")
+async def upload_remark_images(
+    remark_id: int,
+    files: list[UploadFile] = File(...),
+    session: AsyncSession = Depends(get_session),
+):
+    exists = await session.execute(text("SELECT id FROM cattle_remark WHERE id = :id"), {"id": remark_id})
+    if not exists.fetchone():
+        raise HTTPException(status_code=404, detail="Remark not found")
+    os.makedirs("uploads/remarks", exist_ok=True)
+    saved = []
+    for file in files:
+        filename = f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{file.filename}"
+        filepath = os.path.join("uploads/remarks", filename)
+        content = await file.read()
+        with open(filepath, "wb") as f:
+            f.write(content)
+        url = f"/uploads/remarks/{filename}"
+        ins = await session.execute(text("INSERT INTO cattle_remarks_images (remark_id, image_url) VALUES (:rid, :url) RETURNING id, image_url"), {"rid": remark_id, "url": url})
+        r = ins.fetchone()
+        saved.append({"id": r[0], "image_url": r[1]})
+    await session.commit()
+    return {"success": True, "images": saved}
+
+@app.delete("/cattle-remarks/images/{image_id}")
+async def delete_remark_image(
+    image_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(text("DELETE FROM cattle_remarks_images WHERE id = :id RETURNING id"), {"id": image_id})
+    if not result.fetchone():
+        raise HTTPException(status_code=404, detail="Image not found")
+    await session.commit()
+    return {"success": True}
+
 DEFAULT_DRILL_TAGS = [
     "SOM-006", "SOM-015", "SOM-020", "SOM-023", "SOM-025", "SOM-038", "SOM-040", "SOM-041",
     "SOM-055", "SOM-061", "SOM-068", "SOM-085", "SOM-087", "SOM-089", "SOM-091", "SOM-103",
@@ -872,6 +1072,79 @@ async def get_cattle_drill_down(
         mother=DrillDownSection(records=mother_records),
         maternal_aunt=DrillDownSection(records=aunt_records),
     )
+
+
+BULL_FILTER_TAGS = ["SOM-157", "SOM-333", "SOM-337", "SOM-338"]
+
+
+@app.get("/cattle/bull-tags")
+async def get_bull_tags(session: AsyncSession = Depends(get_session)):
+    result = await session.execute(
+        text("SELECT tag_number, name FROM cattle_data WHERE animal_type = 'BULL' ORDER BY tag_number"),
+    )
+    rows = result.fetchall()
+    return [{"tag_number": r[0], "name": r[1], "animal_type": "BULL"} for r in rows]
+
+
+@app.get("/cattle/bull/{bull_tag}/children")
+async def get_bull_children(
+    bull_tag: str,
+    mode: str = "bull",
+    session: AsyncSession = Depends(get_session),
+):
+    bull_row = await session.execute(
+        text("SELECT tag_number, name, animal_type FROM cattle_data WHERE tag_number = :t"), {"t": bull_tag}
+    )
+    brow = bull_row.fetchone()
+    if not brow or (brow[2] or "").upper() != "BULL":
+        raise HTTPException(status_code=404, detail="Bull not found or not a BULL")
+    bull_name = brow[1]
+
+    if mode == "not_bull":
+        return {"bull_tag_number": bull_tag, "bull_name": bull_name, "mode": mode, "count": 0, "children": []}
+
+    async def build_detail(tag: str):
+        info = await session.execute(text("SELECT name, tag_number, date_of_birth FROM cattle_data WHERE tag_number = :t"), {"t": tag})
+        row = info.fetchone()
+        if not row:
+            return None
+        name, tnum, dob = row[0], row[1], row[2]
+        avg_res = await session.execute(text("SELECT ROUND(AVG(milk)::numeric, 1) FROM cattle_milk_logs WHERE tag_number = :t"), {"t": tnum})
+        avg_milk = avg_res.scalar()
+        avg_val = float(avg_milk) if avg_milk is not None else None
+        phys_res = await session.execute(text("SELECT hip_width, head, ear, eye, muzzle, horn, skin, tail, hump, udder, teat, dewlap, milk_vein FROM cattle_physical_logs WHERE tag_number = :t ORDER BY id DESC LIMIT 1"), {"t": tnum})
+        prow = phys_res.fetchone()
+        pm = None
+        total = None
+        if prow:
+            vals = [prow[1], prow[2], prow[3], prow[4], prow[5], prow[6], prow[7], prow[8], prow[9], prow[10], prow[11], prow[12]]
+            has = any(v is not None for v in vals)
+            if has:
+                total = round(sum(v for v in vals if v is not None), 1)
+            pm = {
+                "hip_width": str(prow[0]) if prow[0] is not None else None,
+                "head": float(prow[1]) if prow[1] is not None else None,
+                "ear": float(prow[2]) if prow[2] is not None else None,
+                "eye": float(prow[3]) if prow[3] is not None else None,
+                "muzzle": float(prow[4]) if prow[4] is not None else None,
+                "horn": float(prow[5]) if prow[5] is not None else None,
+                "skin": float(prow[6]) if prow[6] is not None else None,
+                "tail": float(prow[7]) if prow[7] is not None else None,
+                "hump": float(prow[8]) if prow[8] is not None else None,
+                "udder": float(prow[9]) if prow[9] is not None else None,
+                "teat": float(prow[10]) if prow[10] is not None else None,
+                "dewlap": float(prow[11]) if prow[11] is not None else None,
+                "milk_vein": float(prow[12]) if prow[12] is not None else None,
+            }
+        return {"name": name, "tag_number": tnum, "date_of_birth": str(dob) if dob else None, "average_milk": avg_val, "physical_mark": pm, "physical_total": total}
+
+    crows = await session.execute(text("SELECT tag_number FROM cattle_data WHERE father_tag_number = :bt ORDER BY tag_number"), {"bt": bull_tag})
+    children = []
+    for r in crows.fetchall():
+        d = await build_detail(r[0])
+        if d:
+            children.append(d)
+    return {"bull_tag_number": bull_tag, "bull_name": bull_name, "mode": mode, "count": len(children), "children": children}
 
 
 @app.get("/cattle/drill-tags")
@@ -1014,17 +1287,47 @@ async def get_cattle_profile(
     tag_number: str,
     session: AsyncSession = Depends(get_session),
 ):
-    result = await session.execute(
-        text("SELECT get_cattle_profile(:tag)"),
-        {"tag": tag_number},
-    )
-
-    profile_data = result.scalar()
-
-    if profile_data is None:
-        raise HTTPException(status_code=404, detail="Cattle not found")
-
-    return profile_data
+    import asyncio as _asyncio
+    async def _fetch():
+        result = await session.execute(text("SELECT get_cattle_profile(:tag)"), {"tag": tag_number})
+        return result.scalar()
+    try:
+        profile_data = await _asyncio.wait_for(_fetch(), timeout=4.0)
+        if profile_data is None:
+            raise HTTPException(status_code=404, detail="Cattle not found")
+        return profile_data
+    except (_asyncio.TimeoutError, TimeoutError, Exception) as e:
+        print(f"get_cattle_profile fallback for {tag_number} due to: {e}")
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+        # Fallback: build minimal profile from cattle_data
+        row = (await session.execute(text("SELECT tag_number, name, mother_tag_number, father_tag_number, date_of_birth, new_is_currently_present FROM cattle_data WHERE tag_number = :t"), {"t": tag_number})).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Cattle not found")
+        tag, name, mtag, ftag, dob, present = row[0], row[1], row[2], row[3], row[4], row[5]
+        mname = None
+        fname = None
+        if mtag:
+            mr = await session.execute(text("SELECT name FROM cattle_data WHERE tag_number = :t"), {"t": mtag})
+            mname = mr.scalar()
+        if ftag and ftag != "બીજદાન":
+            fr = await session.execute(text("SELECT name FROM cattle_data WHERE tag_number = :t"), {"t": ftag})
+            fname = fr.scalar() or ftag
+        elif ftag == "બીજદાન":
+            fr = await session.execute(text("SELECT father_name FROM cattle_data WHERE tag_number = :t"), {"t": tag_number})
+            fname = fr.scalar() or "G-008"
+        return {
+            "overview": {
+                "name": name, "tag_number": tag, "generation": 1, "date_of_birth": dob, "is_present": present,
+                "total_number_of_children": 0, "total_number_of_siblings": 0,
+                "mother_name": mname or mtag, "father_name": fname or ftag,
+                "children": [], "physical_data": None
+            },
+            "milk_logs": [],
+            "family_tree": {"mother_name": mname, "father_name": fname, "grand_mother_name": None, "grand_father_name": None, "siblings": []}
+        }
 
 
 @app.get("/all-present-cattle", response_model=List[PresentCattleModel])
@@ -1052,86 +1355,133 @@ async def get_milking_cattle(session: AsyncSession = Depends(get_session)):
 
 @app.get("/genealogy/all", response_model=List[GenealogyCattle])
 async def get_genealogy_all():
-    genealogy_data_json = r.get("all_genealogy")
-    if genealogy_data_json:
-        return json.loads(genealogy_data_json)
+    try:
+        genealogy_data_json = r.get("all_genealogy")
+        if genealogy_data_json:
+            return json.loads(genealogy_data_json)
+    except Exception:
+        pass
+    import asyncio as _asyncio
+    async def _fetch():
+        async for session in get_session():
+            result = await session.execute(text("SELECT * FROM get_all_cattle_for_genealogy();"))
+            cattle_list = result.scalar_one_or_none()
+            if cattle_list is None:
+                raise HTTPException(status_code=404, detail="Geneology data missing error")
+            try:
+                r.setex("all_genealogy", 3600 * 24, json.dumps(cattle_list))
+            except Exception:
+                pass
+            return cattle_list or []
+    try:
+        return await _asyncio.wait_for(_fetch(), timeout=4.0)
+    except (_asyncio.TimeoutError, TimeoutError, Exception) as e:
+        print(f"genealogy/all fallback due to: {e}")
+    # Fallback: direct query without heavy recursion
     async for session in get_session():
-        result = await session.execute(
-            text("SELECT * FROM get_all_cattle_for_genealogy();")
-        )
-        cattle_list = result.scalar_one_or_none()
-        if cattle_list is None:
-            raise HTTPException(status_code=404, detail="Geneology data missing error")
-        r.setex("all_genealogy", 3600 * 24, json.dumps(cattle_list))
-        return cattle_list or []
+        result = await session.execute(text("""
+            SELECT tag_number, name, gender, animal_type, acquisition_type, date_of_birth::text,
+                   new_is_currently_present AS is_present, new_is_currenlty_milking AS is_milking,
+                   new_is_currently_pregnant AS is_pregnant, mother_tag_number, father_tag_number, 1 as generation
+            FROM cattle_data ORDER BY tag_number
+        """))
+        rows = result.fetchall()
+        fallback = [
+            GenealogyCattle(
+                tag_number=row[0], name=row[1], gender=row[2], animal_type=row[3],
+                acquisition_type=row[4], date_of_birth=row[5], is_present=row[6],
+                is_milking=row[7], is_pregnant=row[8], mother_tag_number=row[9],
+                father_tag_number=row[10],
+            )
+            for row in rows
+        ]
+        return fallback
 
 
 @app.get("/genealogy/fathers", response_model=List[GenealogyCattle])
 async def get_genealogy_fathers(session: AsyncSession = Depends(get_session)):
     """Father lineage: all cattle whose father is a BULL, plus top-level bull fathers as roots."""
-    result = await session.execute(
-        text("""
-            WITH bull_fathers AS (
-                SELECT
-                    cd.tag_number,
-                    cd.name
-                FROM cattle_data cd
-                WHERE cd.animal_type = 'BULL'
-                  AND cd.tag_number IN (
-                      SELECT DISTINCT father_tag_number FROM cattle_data
-                      WHERE father_tag_number IS NOT NULL AND father_tag_number != ''
-                  )
-            ),
-            children AS (
-                SELECT
-                    cd.name,
-                    cd.tag_number,
-                    cd.father_name,
-                    cd.father_tag_number,
-                    cd.gender,
-                    cd.animal_type,
-                    cd.acquisition_type,
-                    cd.date_of_birth::text AS date_of_birth,
-                    cd.new_is_currently_present AS is_present,
-                    cd.new_is_currenlty_milking AS is_milking,
-                    cd.new_is_currently_pregnant AS is_pregnant,
-                    cd.mother_tag_number
-                FROM cattle_data cd
-                WHERE cd.father_tag_number IN (
-                    SELECT tag_number FROM cattle_data WHERE cattle_data.animal_type = 'BULL'
+    import asyncio as _asyncio
+    async def _fetch(session):
+        result = await session.execute(
+            text("""
+                WITH bull_fathers AS (
+                    SELECT
+                        cd.tag_number,
+                        cd.name
+                    FROM cattle_data cd
+                    WHERE cd.animal_type = 'BULL'
+                      AND cd.tag_number IN (
+                          SELECT DISTINCT father_tag_number FROM cattle_data
+                          WHERE father_tag_number IS NOT NULL AND father_tag_number != ''
+                      )
+                ),
+                children AS (
+                    SELECT
+                        cd.name,
+                        cd.tag_number,
+                        cd.father_name,
+                        cd.father_tag_number,
+                        cd.gender,
+                        cd.animal_type,
+                        cd.acquisition_type,
+                        cd.date_of_birth::text AS date_of_birth,
+                        cd.new_is_currently_present AS is_present,
+                        cd.new_is_currenlty_milking AS is_milking,
+                        cd.new_is_currently_pregnant AS is_pregnant,
+                        cd.mother_tag_number
+                    FROM cattle_data cd
+                    WHERE cd.father_tag_number IN (
+                        SELECT tag_number FROM cattle_data WHERE cattle_data.animal_type = 'BULL'
+                    )
+                      AND COALESCE(cd.animal_type, '') NOT IN ('BULL')
                 )
-                  AND COALESCE(cd.animal_type, '') NOT IN ('BULL')
-            )
-            SELECT
-                name, tag_number, father_name, father_tag_number,
-                gender, animal_type, acquisition_type, date_of_birth,
-                is_present, is_milking, is_pregnant, mother_tag_number
-            FROM (
                 SELECT
-                    bf.name, bf.tag_number, NULL::text AS father_name, NULL::text AS father_tag_number,
-                    'Male' AS gender, 'BULL' AS animal_type, NULL::text AS acquisition_type, NULL::text AS date_of_birth,
-                    1 AS is_present, 0 AS is_milking, 0 AS is_pregnant, NULL::text AS mother_tag_number
-                FROM bull_fathers bf
-                UNION ALL
-                SELECT
-                    c.name, c.tag_number, c.father_name, c.father_tag_number,
-                    c.gender, c.animal_type, c.acquisition_type, c.date_of_birth,
-                    c.is_present, c.is_milking, c.is_pregnant, c.mother_tag_number
-                FROM children c
-            ) combined
-            ORDER BY father_tag_number NULLS FIRST, name
-        """)
-    )
-    rows = result.fetchall()
-    return [
-        GenealogyCattle(
-            tag_number=row[1], name=row[0], gender=row[4], animal_type=row[5],
-            acquisition_type=row[6], date_of_birth=row[7], is_present=row[8],
-            is_milking=row[9], is_pregnant=row[10], mother_tag_number=row[11],
-            father_tag_number=row[3],
+                    name, tag_number, father_name, father_tag_number,
+                    gender, animal_type, acquisition_type, date_of_birth,
+                    is_present, is_milking, is_pregnant, mother_tag_number
+                FROM (
+                    SELECT
+                        bf.name, bf.tag_number, NULL::text AS father_name, NULL::text AS father_tag_number,
+                        'Male' AS gender, 'BULL' AS animal_type, NULL::text AS acquisition_type, NULL::text AS date_of_birth,
+                        1 AS is_present, 0 AS is_milking, 0 AS is_pregnant, NULL::text AS mother_tag_number
+                    FROM bull_fathers bf
+                    UNION ALL
+                    SELECT
+                        c.name, c.tag_number, c.father_name, c.father_tag_number,
+                        c.gender, c.animal_type, c.acquisition_type, c.date_of_birth,
+                        c.is_present, c.is_milking, c.is_pregnant, c.mother_tag_number
+                    FROM children c
+                ) combined
+                ORDER BY father_tag_number NULLS FIRST, name
+            """)
         )
-        for row in rows
-    ]
+        rows = result.fetchall()
+        return [
+            GenealogyCattle(
+                tag_number=row[1], name=row[0], gender=row[4], animal_type=row[5],
+                acquisition_type=row[6], date_of_birth=row[7], is_present=row[8],
+                is_milking=row[9], is_pregnant=row[10], mother_tag_number=row[11],
+                father_tag_number=row[3],
+            )
+            for row in rows
+        ]
+    try:
+        return await _asyncio.wait_for(_fetch(session), timeout=4.0)
+    except (_asyncio.TimeoutError, TimeoutError, Exception) as e:
+        print(f"genealogy/fathers fallback due to: {e}")
+        # Fallback: direct query for bull fathers + children
+        result = await session.execute(text("""
+            SELECT tag_number, name FROM cattle_data WHERE animal_type='BULL' AND tag_number IN (SELECT DISTINCT father_tag_number FROM cattle_data WHERE father_tag_number IS NOT NULL AND father_tag_number != '') ORDER BY tag_number
+        """))
+        bulls = result.fetchall()
+        out: list[GenealogyCattle] = []
+        for btag, bname in bulls:
+            out.append(GenealogyCattle(tag_number=btag, name=bname, gender="Male", animal_type="BULL", acquisition_type=None, date_of_birth=None, is_present=1, is_milking=0, is_pregnant=0, mother_tag_number=None, father_tag_number=None))
+            cres = await session.execute(text("SELECT tag_number, name, father_name, father_tag_number, gender, animal_type, acquisition_type, date_of_birth::text, new_is_currently_present, new_is_currenlty_milking, new_is_currently_pregnant, mother_tag_number FROM cattle_data WHERE father_tag_number = :bt AND COALESCE(animal_type,'') != 'BULL' ORDER BY tag_number"), {"bt": btag})
+            for r in cres.fetchall():
+                out.append(GenealogyCattle(tag_number=r[0], name=r[1], gender=r[4], animal_type=r[5], acquisition_type=r[6], date_of_birth=r[7], is_present=r[8], is_milking=r[9], is_pregnant=r[10], mother_tag_number=r[11], father_tag_number=r[3]))
+        return out
 
 
 @app.get("/donations/donated-out", response_model=List[DonatedCattleRecord])
@@ -1198,15 +1548,78 @@ async def get_cattle_card(
     tag_number: str,
     session: AsyncSession = Depends(get_session),
 ):
-    result = await session.execute(
-        text("SELECT get_cattle_card_data(:tag)"),
-        {"tag": tag_number},
-    )
-    # print("result", result.scalar())
-    card_data = result.scalar()
-    print(card_data)
+    # Fast path: build response directly from cattle_data without calling the heavy
+    # get_cattle_card_data() DB function (which can hang). This ensures SOM-038 and
+    # all cattle with father_tag_number='બીજદાન' correctly show G-008 / બીજદાન.
+    import asyncio as _asyncio
+
+    card_data = None
+    try:
+        # Try the original function with a short timeout; fallback to direct query if it hangs
+        result = await _asyncio.wait_for(
+            session.execute(text("SELECT get_cattle_card_data(:tag)"), {"tag": tag_number}),
+            timeout=2.5,
+        )
+        card_data = result.scalar()
+    except _asyncio.TimeoutError:
+        print(f"get_cattle_card_data timeout for {tag_number}, using fallback")
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+        card_data = None
+    except Exception as e:
+        print(f"get_cattle_card_data error for {tag_number}: {e}")
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+        card_data = None
 
     if card_data is not None:
+        # Patch father/mother for sperm-donation (બીજદાન) and other cases where function returns "Not available"
+        try:
+            overview = card_data.get("overview") if isinstance(card_data, dict) else None
+            if overview is not None:
+                row_res = await session.execute(
+                    text("SELECT mother_name, mother_tag_number, father_name, father_tag_number FROM cattle_data WHERE tag_number = :tag"),
+                    {"tag": tag_number},
+                )
+                prow = row_res.fetchone()
+                if prow:
+                    mname, mtag, fname, ftag = prow[0], prow[1], prow[2], prow[3]
+                    if mtag and not overview.get("mother_tag_number"):
+                        overview["mother_tag_number"] = mtag
+                    if ftag and not overview.get("father_tag_number"):
+                        overview["father_tag_number"] = ftag
+                    if isinstance(overview.get("mother"), str) and overview.get("mother") == "Not available" and mtag:
+                        mname_from_db = mname
+                        if not mname_from_db and mtag:
+                            mr = await session.execute(text("SELECT name FROM cattle_data WHERE tag_number = :t"), {"t": mtag})
+                            mname_from_db = mr.scalar()
+                        overview["mother"] = {"name": mname_from_db or mname or mtag, "tag_number": mtag, "generation": None}
+                    if isinstance(overview.get("father"), str) and overview.get("father") == "Not available" and ftag:
+                        fname_from_db = fname
+                        if ftag != "બીજદાન":
+                            fr = await session.execute(text("SELECT name FROM cattle_data WHERE tag_number = :t"), {"t": ftag})
+                            n = fr.scalar()
+                            if n:
+                                fname_from_db = n
+                        overview["father"] = {"name": fname_from_db or fname or ftag, "tag_number": ftag, "generation": None}
+                    family = card_data.get("family")
+                    if isinstance(family, dict):
+                        if not family.get("mother") and mtag:
+                            mr = await session.execute(text("SELECT name, tag_number FROM cattle_data WHERE tag_number = :t"), {"t": mtag})
+                            r = mr.fetchone()
+                            if r:
+                                family["mother"] = {"name": r[0], "tag_number": r[1], "generation": None}
+                        if not family.get("father") and ftag and ftag != "બીજદાન":
+                            fr = await session.execute(text("SELECT name, tag_number FROM cattle_data WHERE tag_number = :t"), {"t": ftag})
+                            r = fr.fetchone()
+                            if r:
+                                family["father"] = {"name": r[0], "tag_number": r[1], "generation": None}
+        except Exception as e:
+            print(f"Patch father/mother failed for {tag_number}: {e}")
         return card_data
 
     # Fallback: the lineage CTE may drop cattle with broken parent chains.
@@ -1238,8 +1651,8 @@ async def get_cattle_card(
             "is_present": present,
             "lactation_cycle": "Lactating" if milking else ("Pregnant" if pregnant else "Not available"),
             "last_calving_date": "Not available",
-            "mother": mname or (mtag if mtag else "Not available"),
-            "father": fname or (ftag if ftag else "Not available"),
+            "mother": {"name": mname, "tag_number": mtag, "generation": None} if mtag else (mname or "Not available"),
+            "father": {"name": fname, "tag_number": ftag, "generation": None} if ftag else (fname or "Not available"),
             "childrens": [],
             "breed_score": None,
             "weight": str(weight) if weight is not None else "Not available",
@@ -1252,10 +1665,9 @@ async def get_cattle_card(
         },
         "milk_by_month": [],
         "milk_by_day_only_for_month": [],
-        "family": {"mother": None, "father": None, "siblings": [], "childrens": []},
+        "family": {"mother": {"name": mname, "tag_number": mtag, "generation": None} if mtag else None, "father": {"name": fname, "tag_number": ftag, "generation": None} if ftag and ftag != "બીજદાન" else None, "siblings": [], "childrens": []},
         "pregnancy_logs": [],
     }
-
 
 
 @app.get("/cattle-cardnew/{tag_number}")

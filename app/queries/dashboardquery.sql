@@ -135,7 +135,6 @@ begin
                                         cattle_data child
                                         INNER JOIN cattle_lineage parent
                                             ON child.mother_tag_number = parent.tag_number
-                                            OR child.father_tag_number = parent.tag_number
                                 )
                             SELECT
                                 *
@@ -174,7 +173,6 @@ begin
                                 cattle_data child
                                 INNER JOIN cattle_lineage parent
                                     ON child.mother_tag_number = parent.tag_number
-                                    OR child.father_tag_number = parent.tag_number
                         )
                     SELECT
                         cl.tag_number,
@@ -227,7 +225,6 @@ begin
                                 cattle_data child
                                 INNER JOIN cattle_lineage parent
                                     ON child.mother_tag_number = parent.tag_number
-                                    OR child.father_tag_number = parent.tag_number
                         )
                     SELECT
                         cl.tag_number,
@@ -436,7 +433,6 @@ begin
         from cattle_data child
         inner join cattle_lineage parent
             on child.mother_tag_number = parent.tag_number
-            or child.father_tag_number = parent.tag_number
     ),
     overview_cte as (
         select
@@ -629,7 +625,6 @@ begin
         from cattle_data child
         inner join cattle_lineage parent
             on child.mother_tag_number = parent.tag_number
-            or child.father_tag_number = parent.tag_number
     )
     select
         json_agg(genealogy_data)
@@ -788,7 +783,6 @@ begin
         from cattle_data child
         inner join cattle_lineage parent
             on child.mother_tag_number = parent.tag_number
-            or child.father_tag_number = parent.tag_number
     ),
     me as (
         select * from cattle_lineage where tag_number = target_tag
