@@ -863,8 +863,8 @@ begin
             'weight', case when me.weight_at_birth is not null then me.weight_at_birth::text else 'Not available' end,
             'age', case
                 when me.date_of_birth is not null and me.date_of_birth ~ '^\d{4}-\d{2}-\d{2}' then
-                    extract(year from age(now(), me.date_of_birth::date))::text || ' years'
-                else 'Not available'
+                    (SELECT CASE WHEN a.calc_age IS NULL THEN 'Not Available' ELSE CONCAT(EXTRACT(YEAR FROM a.calc_age)::INT, ' Years, ', EXTRACT(MONTH FROM a.calc_age)::INT, ' Months, ', EXTRACT(DAY FROM a.calc_age)::INT, ' Days') END FROM (SELECT AGE(CURRENT_DATE, NULLIF(NULLIF(TRIM(me.date_of_birth), '-'), '')::DATE) AS calc_age) a)
+                else 'Not Available'
             end,
             'average_milk_per_day', case when me.new_is_currenlty_milking = 1 then (select round(avg(milk)::numeric, 1) from cattle_milk_logs where tag_number = target_tag) else null end,
             'gender', me.gender,

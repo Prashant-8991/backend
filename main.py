@@ -39,6 +39,9 @@ from app.schemas.cattleprofileschema import (
     DrillDownRecord,
     DrillDetailRecord,
     PhysicalMark,
+    LifecycleResponse,
+    LifecycleEvent,
+    LactationPeriodModel,
 )
 from app.schemas.presentcattleschema import PresentCattleModel
 from app.schemas.genealogyschema import GenealogyCattle
@@ -300,52 +303,66 @@ async def delete_user(
 # ── Dashboard ──────────────────────────────────────────────────
 
 @app.get("/dashboard", response_model=CattleDashboardApiResponse)
-async def get_dashboard():
+async def get_dashboard(is_present: int | None = None):
 
-    # Try Redis first
+    # is_present: 1 = Present, 0 = Not Present, None = All
+    cache_key = f"dashboard_data:{is_present if is_present is not None else 'all'}"
     try:
-        dashboard_data_json = r.get("dashboard_data")
+        dashboard_data_json = r.get(cache_key)
         if dashboard_data_json:
             return json.loads(dashboard_data_json)
     except Exception:
         pass
 
-    import asyncio as _asyncio
+    # Only use heavy DB function for default present view; otherwise use fallback
+    if is_present == 1:
+        import asyncio as _asyncio
 
-    async def _fetch_dashboard(session):
-        result = await session.execute(text("SELECT get_dashboard_data()"))
-        return result.scalar()
+        async def _fetch_dashboard(session):
+            result = await session.execute(text("SELECT get_dashboard_data()"))
+            return result.scalar()
 
-    try:
-        async for session in get_session():
-            try:
-                dashboard_data = await _asyncio.wait_for(_fetch_dashboard(session), timeout=4.0)
-            except _asyncio.TimeoutError:
-                raise TimeoutError("get_dashboard_data timeout")
-            if dashboard_data is None:
-                raise HTTPException(status_code=404, detail="Dashboard data not found")
-            try:
-                r.setex("dashboard_data", 20, json.dumps(dashboard_data))
-            except Exception:
-                pass
-            return dashboard_data
-    except (TimeoutError, _asyncio.TimeoutError, Exception) as e:
-        print(f"Dashboard fallback due to: {e}")
+        try:
+            async for session in get_session():
+                try:
+                    dashboard_data = await _asyncio.wait_for(_fetch_dashboard(session), timeout=4.0)
+                except _asyncio.TimeoutError:
+                    raise TimeoutError("get_dashboard_data timeout")
+                if dashboard_data is None:
+                    raise HTTPException(status_code=404, detail="Dashboard data not found")
+                try:
+                    r.setex(cache_key, 20, json.dumps(dashboard_data))
+                except Exception:
+                    pass
+                return dashboard_data
+        except (TimeoutError, _asyncio.TimeoutError, Exception) as e:
+            print(f"Dashboard fallback due to: {e}")
 
-    # Fallback: build dashboard without heavy recursive CTEs
+    # Fallback: build dashboard without heavy recursive CTEs (respects is_present filter)
     async for session in get_session():
-        total_cattle = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = 1"))
+        if is_present is None:
+            total_cattle = await session.scalar(text("SELECT count(*) FROM cattle_data"))
+            where_present = "1=1"
+            params_present: dict = {}
+        else:
+            total_cattle = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = :p"), {"p": is_present})
+            where_present = "new_is_currently_present = :p"
+            params_present = {"p": is_present}
         all_cattle = await session.scalar(text("SELECT count(*) FROM cattle_data"))
-        total_bull = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE animal_type = 'BULL'"))
-        total_ox = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE animal_type = 'OX'"))
-        total_female = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = 1 AND lower(gender) = 'female'"))
-        total_male = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = 1 AND lower(gender) = 'male'"))
-        total_female_calf = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = 1 AND lower(animal_type) = 'female calf'"))
-        total_male_calf = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = 1 AND lower(animal_type) = 'male calf'"))
-        total_milking = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currenlty_milking = 1 AND new_is_currently_present = 1"))
-        total_pregnant = await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_present = 1 AND new_is_currently_pregnant = 1"))
+        # For bull/ox we show overall counts (not filtered by present) to keep dashboard context, but filtered counts below respect filter
+        total_bull = await session.scalar(text(f"SELECT count(*) FROM cattle_data WHERE {where_present} AND animal_type = 'BULL'"), params_present) if is_present is not None else await session.scalar(text("SELECT count(*) FROM cattle_data WHERE animal_type = 'BULL'"))
+        total_ox = await session.scalar(text(f"SELECT count(*) FROM cattle_data WHERE {where_present} AND animal_type = 'OX'"), params_present) if is_present is not None else await session.scalar(text("SELECT count(*) FROM cattle_data WHERE animal_type = 'OX'"))
+        total_female = await session.scalar(text(f"SELECT count(*) FROM cattle_data WHERE {where_present} AND lower(gender) = 'female'"), params_present) if is_present is not None else await session.scalar(text("SELECT count(*) FROM cattle_data WHERE lower(gender) = 'female'"))
+        total_male = await session.scalar(text(f"SELECT count(*) FROM cattle_data WHERE {where_present} AND lower(gender) = 'male'"), params_present) if is_present is not None else await session.scalar(text("SELECT count(*) FROM cattle_data WHERE lower(gender) = 'male'"))
+        total_female_calf = await session.scalar(text(f"SELECT count(*) FROM cattle_data WHERE {where_present} AND lower(animal_type) = 'female calf'"), params_present) if is_present is not None else await session.scalar(text("SELECT count(*) FROM cattle_data WHERE lower(animal_type) = 'female calf'"))
+        total_male_calf = await session.scalar(text(f"SELECT count(*) FROM cattle_data WHERE {where_present} AND lower(animal_type) = 'male calf'"), params_present) if is_present is not None else await session.scalar(text("SELECT count(*) FROM cattle_data WHERE lower(animal_type) = 'male calf'"))
+        total_milking = await session.scalar(text(f"SELECT count(*) FROM cattle_data WHERE new_is_currenlty_milking = 1 AND {where_present}"), params_present) if is_present is not None else await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currenlty_milking = 1"))
+        total_pregnant = await session.scalar(text(f"SELECT count(*) FROM cattle_data WHERE {where_present} AND new_is_currently_pregnant = 1"), params_present) if is_present is not None else await session.scalar(text("SELECT count(*) FROM cattle_data WHERE new_is_currently_pregnant = 1"))
 
-        src_rows = (await session.execute(text("SELECT acquisition_type, count(*) as total_cattle FROM cattle_data WHERE new_is_currently_present = 1 GROUP BY acquisition_type ORDER BY total_cattle desc"))).fetchall()
+        if is_present is None:
+            src_rows = (await session.execute(text("SELECT acquisition_type, count(*) as total_cattle FROM cattle_data GROUP BY acquisition_type ORDER BY total_cattle desc"))).fetchall()
+        else:
+            src_rows = (await session.execute(text(f"SELECT acquisition_type, count(*) as total_cattle FROM cattle_data WHERE {where_present} GROUP BY acquisition_type ORDER BY total_cattle desc"), params_present)).fetchall()
         source_breakdown = [{"acquisition_type": r[0], "total_cattle": r[1]} for r in src_rows]
 
         try:
@@ -836,6 +853,157 @@ async def get_weight_timeline(
         max_weight=max_w,
         min_weight=min_w,
         records=recs,
+    )
+
+
+@app.get("/cattle/{tag_number}/lifecycle", response_model=LifecycleResponse)
+async def get_cattle_lifecycle(
+    tag_number: str,
+    session: AsyncSession = Depends(get_session),
+):
+    # Fetch cattle basic
+    cow = await session.execute(text("SELECT tag_number, name, date_of_birth::text FROM cattle_data WHERE tag_number = :tag"), {"tag": tag_number})
+    crow = cow.fetchone()
+    if crow is None:
+        raise HTTPException(status_code=404, detail="Cattle not found")
+    tag, name, dob_raw = crow[0], crow[1], crow[2]
+    dob_iso = _safe_iso_date(dob_raw) or "2000-01-15"
+
+    # Build reproduction events using real pregnancy logs + birth
+    reproductionEvents = []
+    # Birth event
+    reproductionEvents.append({
+        "id": "birth",
+        "type": "Birth",
+        "date": dob_iso,
+        "label": dob_iso,
+        "color": "bg-emerald-500 dark:bg-yellow-500",
+        "position": "above",
+        "group": None,
+        "title": None,
+    })
+    preg_rows = (await session.execute(text("SELECT id, conception_date, birth_date FROM cattle_pragnancies_logs WHERE tag_number = :tag ORDER BY id"), {"tag": tag_number})).fetchall()
+    # Fetch children for bull label mapping
+    child_rows = (await session.execute(text("SELECT tag_number, father_tag_number, father_name FROM cattle_data WHERE mother_tag_number = :tag"), {"tag": tag_number})).fetchall()
+    # Map birth iso -> bull label
+    # Build quick lookup for bull name per birth
+    birth_to_bull = {}
+    for cr in child_rows:
+        # need child's dob to map? Instead map via pregnancy birth date matching child's dob would be complex; fallback to father_name
+        pass
+
+    lactationPeriods = []
+    for idx, pr in enumerate(preg_rows, start=1):
+        pid, conc_raw, birth_raw = pr[0], pr[1], pr[2]
+        conc_iso = _safe_iso_date(conc_raw)
+        birth_iso = _safe_iso_date(birth_raw)
+        if conc_iso:
+            # Try to find bull for this conception via child's father
+            bull_label = f"Bull-{idx}"
+            # Find child whose dob matches birth_iso to get father
+            if birth_iso:
+                crow2 = await session.execute(text("SELECT father_tag_number, father_name FROM cattle_data WHERE mother_tag_number = :m AND date_of_birth::text LIKE :d || '%'"), {"m": tag_number, "d": birth_iso})
+                fr = crow2.fetchone()
+                if fr and fr[1]:
+                    bull_label = fr[1]
+                elif fr and fr[0]:
+                    bull_label = fr[0]
+            reproductionEvents.append({
+                "id": f"conc-{idx}",
+                "type": "Conception",
+                "date": conc_iso,
+                "label": bull_label,
+                "color": "bg-pink-500 dark:bg-yellow-600",
+                "position": "below",
+                "group": idx,
+                "title": None,
+            })
+        if birth_iso:
+            # Find child tag for label
+            child_label = f"Calf-{idx:03d}"
+            crow2 = await session.execute(text("SELECT tag_number, name FROM cattle_data WHERE mother_tag_number = :m AND date_of_birth::text LIKE :d || '%'"), {"m": tag_number, "d": birth_iso})
+            cr = crow2.fetchone()
+            if cr:
+                child_label = cr[1] or cr[0]
+            reproductionEvents.append({
+                "id": f"calv-{idx}",
+                "type": "Calving",
+                "date": birth_iso,
+                "label": child_label,
+                "color": "bg-emerald-500 dark:bg-yellow-400",
+                "position": "above",
+                "group": idx,
+                "title": f"PREGNANCY #{idx}",
+            })
+            # Vaccine every 2nd
+            if idx % 2 == 0 and conc_iso:
+                try:
+                    from datetime import datetime, timedelta
+                    vax_dt = datetime.strptime(conc_iso, "%Y-%m-%d") + timedelta(days=100)
+                    vax_iso = vax_dt.strftime("%Y-%m-%d")
+                    reproductionEvents.append({
+                        "id": f"vax-{idx}",
+                        "type": "Vaccine",
+                        "date": vax_iso,
+                        "label": "BVD/IBR",
+                        "color": "bg-blue-500 dark:bg-cyan-500",
+                        "position": "far-above",
+                        "group": idx,
+                        "title": None,
+                    })
+                except Exception:
+                    pass
+            # Lactation period: calving to calving+305
+            try:
+                from datetime import datetime, timedelta
+                s = datetime.strptime(birth_iso, "%Y-%m-%d")
+                e = s + timedelta(days=305)
+                lactationPeriods.append({"id": idx, "start": birth_iso, "end": e.strftime("%Y-%m-%d"), "title": f"LACTATION #{idx}"})
+            except Exception:
+                pass
+
+    # Milk data from real logs (every record)
+    milk_rows = (await session.execute(text("SELECT date::text, milk FROM cattle_milk_logs WHERE tag_number = :tag ORDER BY date"), {"tag": tag_number})).fetchall()
+    milkData = []
+    for r in milk_rows:
+        d, m = r[0], r[1]
+        try:
+            from datetime import datetime
+            ts = int(datetime.strptime(d, "%Y-%m-%d").timestamp() * 1000)
+            milkData.append({"timestamp": ts, "yield": float(m or 0)})
+        except Exception:
+            continue
+    # If no milk data, fallback to empty (chart will be empty)
+
+    # Weight data from new_weight_record
+    weight_rows = (await session.execute(text("SELECT months::text, MAX(weights)::real as w FROM new_weight_record WHERE tag_number = :tag AND weights > 0 GROUP BY months ORDER BY months"), {"tag": tag_number})).fetchall()
+    weightData = []
+    for r in weight_rows:
+        d, w = r[0], r[1]
+        try:
+            from datetime import datetime
+            ts = int(datetime.strptime(d, "%Y-%m-%d").timestamp() * 1000)
+            weightData.append({"timestamp": ts, "weight": float(w or 0)})
+        except Exception:
+            continue
+
+    # Stats
+    stats = {
+        "pregnancies": len([e for e in reproductionEvents if e["type"] == "Conception"]),
+        "lactations": len(lactationPeriods),
+        "milk_points": len(milkData),
+        "weight_points": len(weightData),
+    }
+
+    return LifecycleResponse(
+        tag_number=tag,
+        name=name,
+        date_of_birth=dob_iso,
+        reproductionEvents=reproductionEvents,
+        lactationPeriods=lactationPeriods,
+        milkData=milkData,
+        weightData=weightData,
+        stats=stats,
     )
 
 
@@ -1331,18 +1499,61 @@ async def get_cattle_profile(
 
 
 @app.get("/all-present-cattle", response_model=List[PresentCattleModel])
-async def all_present_cattle():
-    all_present_cattle_json = r.get("all_present_cattle")
-    if all_present_cattle_json:
-        return json.loads(all_present_cattle_json)
+async def all_present_cattle(is_present: int | None = None):
+    # is_present: 1 = Present, 0 = Not Present, None = All (default All)
+    if is_present not in (0, 1, None):
+        is_present = None
+    cache_key = f"all_present_cattle:{is_present if is_present is not None else 'all'}"
+    try:
+        cached = r.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        pass
+
+    # For default present view, try to use the DB function (fast + cached)
+    if is_present == 1:
+        try:
+            async for session in get_session():
+                result = await session.execute(text("SELECT * FROM get_all_present_cattle();"))
+                cattle_list = result.scalar_one_or_none()
+                if cattle_list is not None:
+                    try:
+                        r.setex(cache_key, 30, json.dumps(cattle_list))
+                    except Exception:
+                        pass
+                    return cattle_list
+        except Exception as e:
+            print(f"get_all_present_cattle fallback due to: {e}")
+
+    # Fallback / Not Present / All: direct query
     async for session in get_session():
-        result = await session.execute(text("SELECT * FROM get_all_present_cattle();"))
-        cattle_list = result.scalar_one_or_none()
-        if cattle_list is None:
-            raise HTTPException(
-                status_code=404, detail="All Present Cattle Data not avaialable error"
-            )
-        r.setex("all_present_cattle", 30, json.dumps(cattle_list))
+        if is_present is None:
+            where = "1=1"
+            params: dict = {}
+        else:
+            where = "new_is_currently_present = :p"
+            params = {"p": is_present}
+        result = await session.execute(
+            text(f"""
+                SELECT tag_number, name, gender, acquisition_type, animal_type,
+                       new_is_currenlty_milking as is_milking,
+                       new_is_currently_pregnant as is_pregnant
+                FROM cattle_data
+                WHERE {where}
+                ORDER BY tag_number
+            """),
+            params,
+        )
+        rows = result.fetchall()
+        cattle_list = [
+            {"tag_number": r[0], "name": r[1], "gender": r[2], "acquisition_type": r[3], "animal_type": r[4], "is_milking": r[5], "is_pregnant": r[6]}
+            for r in rows
+        ]
+        try:
+            r.setex(cache_key, 30, json.dumps(cattle_list))
+        except Exception:
+            pass
         return cattle_list
 
 

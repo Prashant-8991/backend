@@ -172,3 +172,41 @@ class CattleDrillDetailResponse(BaseModel):
     sisters: list[DrillDetailRecord] = []
     maternal_grandmother: DrillDetailRecord | None = None
     maternal_aunts: list[DrillDetailRecord] = []
+
+
+class LifecycleEvent(BaseModel):
+    id: str
+    type: str
+    date: str
+    label: str
+    color: str | None = None
+    position: str | None = None
+    group: int | None = None
+    title: str | None = None
+
+
+class LactationPeriodModel(BaseModel):
+    id: int
+    start: str
+    end: str
+    title: str
+
+
+class MilkPointLifecycle(BaseModel):
+    timestamp: int
+    yield_: float | None = None
+    weight: float | None = None
+
+    class Config:
+        fields = {"yield_": "yield"}
+
+
+class LifecycleResponse(BaseModel):
+    tag_number: str
+    name: str | None = None
+    date_of_birth: str | None = None
+    reproductionEvents: list[LifecycleEvent] = []
+    lactationPeriods: list[LactationPeriodModel] = []
+    milkData: list[dict] = []
+    weightData: list[dict] = []
+    stats: dict | None = None
