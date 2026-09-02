@@ -161,6 +161,7 @@ class DrillDetailRecord(BaseModel):
     name: str | None = None
     tag_number: str
     date_of_birth: str | None = None
+    gender: str | None = None
     average_milk: float | None = None
     physical_mark: PhysicalMark | None = None
     physical_total: float | None = None

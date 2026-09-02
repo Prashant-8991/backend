@@ -1272,11 +1272,11 @@ async def get_bull_children(
         return {"bull_tag_number": bull_tag, "bull_name": bull_name, "mode": mode, "count": 0, "children": []}
 
     async def build_detail(tag: str):
-        info = await session.execute(text("SELECT name, tag_number, date_of_birth FROM cattle_data WHERE tag_number = :t"), {"t": tag})
+        info = await session.execute(text("SELECT name, tag_number, date_of_birth, gender FROM cattle_data WHERE tag_number = :t"), {"t": tag})
         row = info.fetchone()
         if not row:
             return None
-        name, tnum, dob = row[0], row[1], row[2]
+        name, tnum, dob, gender = row[0], row[1], row[2], row[3]
         avg_res = await session.execute(text("SELECT ROUND(AVG(milk)::numeric, 1) FROM cattle_milk_logs WHERE tag_number = :t"), {"t": tnum})
         avg_milk = avg_res.scalar()
         avg_val = float(avg_milk) if avg_milk is not None else None
@@ -1304,7 +1304,7 @@ async def get_bull_children(
                 "dewlap": float(prow[11]) if prow[11] is not None else None,
                 "milk_vein": float(prow[12]) if prow[12] is not None else None,
             }
-        return {"name": name, "tag_number": tnum, "date_of_birth": str(dob) if dob else None, "average_milk": avg_val, "physical_mark": pm, "physical_total": total}
+        return {"name": name, "tag_number": tnum, "date_of_birth": str(dob) if dob else None, "gender": gender, "average_milk": avg_val, "physical_mark": pm, "physical_total": total}
 
     crows = await session.execute(text("SELECT tag_number FROM cattle_data WHERE father_tag_number = :bt ORDER BY tag_number"), {"bt": bull_tag})
     children = []
@@ -1335,13 +1335,13 @@ async def get_cattle_maternal_drill(
 ):
     async def build_detail(tag: str) -> DrillDetailRecord | None:
         info = await session.execute(
-            text("SELECT name, tag_number, date_of_birth FROM cattle_data WHERE tag_number = :t"),
+            text("SELECT name, tag_number, date_of_birth, gender FROM cattle_data WHERE tag_number = :t"),
             {"t": tag},
         )
         row = info.fetchone()
         if not row:
             return None
-        name, tnum, dob = row[0], row[1], row[2]
+        name, tnum, dob, gender = row[0], row[1], row[2], row[3]
         avg_res = await session.execute(
             text("SELECT ROUND(AVG(milk)::numeric, 1) FROM cattle_milk_logs WHERE tag_number = :t"),
             {"t": tnum},
@@ -1382,6 +1382,7 @@ async def get_cattle_maternal_drill(
             name=name,
             tag_number=tnum,
             date_of_birth=str(dob) if dob else None,
+            gender=gender,
             average_milk=avg_val,
             physical_mark=pm,
             physical_total=total,
@@ -1406,7 +1407,7 @@ async def get_cattle_maternal_drill(
             text("""
                 SELECT tag_number FROM cattle_data
                 WHERE mother_tag_number = :mt AND tag_number != :self
-                  AND lower(gender) = 'female' AND new_is_currently_present = 1
+                  AND new_is_currently_present = 1
                 ORDER BY tag_number
             """),
             {"mt": mother_tag, "self": tag_number},
@@ -1431,7 +1432,7 @@ async def get_cattle_maternal_drill(
                 text("""
                     SELECT tag_number FROM cattle_data
                     WHERE mother_tag_number = :gm AND tag_number != :mt
-                      AND lower(gender) = 'female' AND new_is_currently_present = 1
+                      AND new_is_currently_present = 1
                     ORDER BY tag_number
                 """),
                 {"gm": gm_tag, "mt": mother_tag},
