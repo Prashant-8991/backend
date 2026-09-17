@@ -162,7 +162,9 @@ class DrillDetailRecord(BaseModel):
     tag_number: str
     date_of_birth: str | None = None
     gender: str | None = None
+    is_present: int | None = None
     average_milk: float | None = None
+    milk_remarks: str | None = None
     physical_mark: PhysicalMark | None = None
     physical_total: float | None = None
 
@@ -170,9 +172,13 @@ class DrillDetailRecord(BaseModel):
 class CattleDrillDetailResponse(BaseModel):
     cattle: DrillDetailRecord | None = None
     mother: DrillDetailRecord | None = None
+    father: DrillDetailRecord | None = None
     sisters: list[DrillDetailRecord] = []
     maternal_grandmother: DrillDetailRecord | None = None
     maternal_aunts: list[DrillDetailRecord] = []
+    paternal_grandmother: DrillDetailRecord | None = None
+    paternal_aunts: list[DrillDetailRecord] = []
+    children: list[DrillDetailRecord] = []
 
 
 class LifecycleEvent(BaseModel):
@@ -211,3 +217,45 @@ class LifecycleResponse(BaseModel):
     milkData: list[dict] = []
     weightData: list[dict] = []
     stats: dict | None = None
+
+
+class DailyMilkPoint(BaseModel):
+    date: str
+    day: int
+    milk: float | None = None
+
+
+class DailyMilkResponse(BaseModel):
+    tag_number: str
+    year: int
+    month: int
+    records: list[DailyMilkPoint] = []
+    total: float | None = None
+    average: float | None = None
+
+
+class MonthlyMilkPoint(BaseModel):
+    month: str
+    month_num: int
+    month_name: str
+    milk: float | None = None
+
+
+class MonthlyMilkResponse(BaseModel):
+    tag_number: str
+    year: int
+    records: list[MonthlyMilkPoint] = []
+    total: float | None = None
+    average: float | None = None
+
+
+class YearlyMilkPoint(BaseModel):
+    year: str
+    milk: float
+
+
+class YearlyMilkResponse(BaseModel):
+    tag_number: str
+    records: list[YearlyMilkPoint] = []
+    total: float | None = None
+    average: float | None = None

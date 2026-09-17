@@ -42,6 +42,12 @@ from app.schemas.cattleprofileschema import (
     LifecycleResponse,
     LifecycleEvent,
     LactationPeriodModel,
+    DailyMilkResponse,
+    DailyMilkPoint,
+    MonthlyMilkResponse,
+    MonthlyMilkPoint,
+    YearlyMilkResponse,
+    YearlyMilkPoint,
 )
 from app.schemas.presentcattleschema import PresentCattleModel
 from app.schemas.genealogyschema import GenealogyCattle
@@ -384,7 +390,8 @@ async def get_dashboard(is_present: int | None = None):
         try:
             top_fit_rows = (await session.execute(text("""
                 SELECT tag_number, hip_width, ROUND((COALESCE(head,0)+COALESCE(ear,0)+COALESCE(eye,0)+COALESCE(muzzle,0)+COALESCE(horn,0)+COALESCE(skin,0)+COALESCE(tail,0)+COALESCE(hump,0)+COALESCE(udder,0)+COALESCE(teat,0)+COALESCE(dewlap,0)+COALESCE(milk_vein,0))::numeric/12,3) as total_score
-                FROM cattle_physical_logs ORDER BY total_score DESC LIMIT 10
+                FROM (SELECT DISTINCT ON (tag_number) tag_number, hip_width, head, ear, eye, muzzle, horn, skin, tail, hump, udder, teat, dewlap, milk_vein FROM cattle_physical_logs ORDER BY tag_number, id DESC) latest
+                ORDER BY total_score DESC LIMIT 10
             """))).fetchall()
             top_10_fit_cattle = [{"tag_number": r[0], "name": None, "generation": None, "hip_width": r[1], "total_score": float(r[2] or 0)} for r in top_fit_rows]
             for rec in top_10_fit_cattle:
@@ -856,6 +863,75 @@ async def get_weight_timeline(
     )
 
 
+@app.get("/cattle/{tag_number}/milk/daily", response_model=DailyMilkResponse)
+async def get_milking_daily(
+    tag_number: str,
+    year: int,
+    month: int,
+    session: AsyncSession = Depends(get_session),
+):
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=400, detail="month must be 1-12")
+    exists = await session.execute(text("SELECT 1 FROM cattle_data WHERE tag_number = :t"), {"t": tag_number})
+    if not exists.fetchone():
+        raise HTTPException(status_code=404, detail="Cattle not found")
+    import calendar
+    _, days_in_month = calendar.monthrange(year, month)
+    rows = (await session.execute(text("SELECT date::text, milk FROM cattle_milk_logs WHERE tag_number = :t AND EXTRACT(YEAR FROM date) = :y AND EXTRACT(MONTH FROM date) = :m ORDER BY date"), {"t": tag_number, "y": year, "m": month})).fetchall()
+    milk_map: dict[str, float] = {}
+    for d, m in rows:
+        try:
+            milk_map[str(d)] = float(m) if m is not None else None
+        except Exception:
+            continue
+    records: list[DailyMilkPoint] = []
+    for day in range(1, days_in_month + 1):
+        ds = f"{year:04d}-{month:02d}-{day:02d}"
+        records.append(DailyMilkPoint(date=ds, day=day, milk=milk_map.get(ds)))
+    vals = [r.milk for r in records if r.milk is not None]
+    total = round(sum(vals), 1) if vals else None
+    average = round(sum(vals) / len(vals), 1) if vals else None
+    return DailyMilkResponse(tag_number=tag_number, year=year, month=month, records=records, total=total, average=average)
+
+
+@app.get("/cattle/{tag_number}/milk/monthly", response_model=MonthlyMilkResponse)
+async def get_milking_monthly(
+    tag_number: str,
+    year: int,
+    session: AsyncSession = Depends(get_session),
+):
+    exists = await session.execute(text("SELECT 1 FROM cattle_data WHERE tag_number = :t"), {"t": tag_number})
+    if not exists.fetchone():
+        raise HTTPException(status_code=404, detail="Cattle not found")
+    rows = (await session.execute(text("SELECT TO_CHAR(date, 'YYYY-MM') AS m, ROUND(SUM(milk)::numeric, 1) AS total FROM cattle_milk_logs WHERE tag_number = :t AND EXTRACT(YEAR FROM date) = :y GROUP BY TO_CHAR(date, 'YYYY-MM') ORDER BY m"), {"t": tag_number, "y": year})).fetchall()
+    milk_map = {r[0]: float(r[1]) for r in rows if r[1] is not None}
+    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    records: list[MonthlyMilkPoint] = []
+    for i in range(1, 13):
+        key = f"{year:04d}-{i:02d}"
+        records.append(MonthlyMilkPoint(month=key, month_num=i, month_name=month_names[i - 1], milk=milk_map.get(key)))
+    vals = [r.milk for r in records if r.milk is not None]
+    total = round(sum(vals), 1) if vals else None
+    average = round(sum(vals) / len(vals), 1) if vals else None
+    return MonthlyMilkResponse(tag_number=tag_number, year=year, records=records, total=total, average=average)
+
+
+@app.get("/cattle/{tag_number}/milk/yearly", response_model=YearlyMilkResponse)
+async def get_milking_yearly(
+    tag_number: str,
+    session: AsyncSession = Depends(get_session),
+):
+    exists = await session.execute(text("SELECT 1 FROM cattle_data WHERE tag_number = :t"), {"t": tag_number})
+    if not exists.fetchone():
+        raise HTTPException(status_code=404, detail="Cattle not found")
+    rows = (await session.execute(text("SELECT TO_CHAR(date, 'YYYY') AS y, ROUND(SUM(milk)::numeric, 1) AS total FROM cattle_milk_logs WHERE tag_number = :t GROUP BY TO_CHAR(date, 'YYYY') ORDER BY y"), {"t": tag_number})).fetchall()
+    records = [YearlyMilkPoint(year=str(r[0]), milk=float(r[1])) for r in rows if r[1] is not None]
+    vals = [r.milk for r in records]
+    total = round(sum(vals), 1) if vals else None
+    average = round(sum(vals) / len(vals), 1) if vals else None
+    return YearlyMilkResponse(tag_number=tag_number, records=records, total=total, average=average)
+
+
 @app.get("/cattle/{tag_number}/lifecycle", response_model=LifecycleResponse)
 async def get_cattle_lifecycle(
     tag_number: str,
@@ -1272,11 +1348,11 @@ async def get_bull_children(
         return {"bull_tag_number": bull_tag, "bull_name": bull_name, "mode": mode, "count": 0, "children": []}
 
     async def build_detail(tag: str):
-        info = await session.execute(text("SELECT name, tag_number, date_of_birth, gender FROM cattle_data WHERE tag_number = :t"), {"t": tag})
+        info = await session.execute(text("SELECT name, tag_number, date_of_birth, gender, new_is_currently_present, milk_remarks FROM cattle_data WHERE tag_number = :t"), {"t": tag})
         row = info.fetchone()
         if not row:
             return None
-        name, tnum, dob, gender = row[0], row[1], row[2], row[3]
+        name, tnum, dob, gender, is_present_val, milk_remarks_val = row[0], row[1], row[2], row[3], row[4], row[5]
         avg_res = await session.execute(text("SELECT ROUND(AVG(milk)::numeric, 1) FROM cattle_milk_logs WHERE tag_number = :t"), {"t": tnum})
         avg_milk = avg_res.scalar()
         avg_val = float(avg_milk) if avg_milk is not None else None
@@ -1304,7 +1380,7 @@ async def get_bull_children(
                 "dewlap": float(prow[11]) if prow[11] is not None else None,
                 "milk_vein": float(prow[12]) if prow[12] is not None else None,
             }
-        return {"name": name, "tag_number": tnum, "date_of_birth": str(dob) if dob else None, "gender": gender, "average_milk": avg_val, "physical_mark": pm, "physical_total": total}
+        return {"name": name, "tag_number": tnum, "date_of_birth": str(dob) if dob else None, "gender": gender, "is_present": int(is_present_val) if is_present_val is not None else None, "milk_remarks": milk_remarks_val, "average_milk": avg_val, "physical_mark": pm, "physical_total": total}
 
     crows = await session.execute(text("SELECT tag_number FROM cattle_data WHERE father_tag_number = :bt ORDER BY tag_number"), {"bt": bull_tag})
     children = []
@@ -1335,13 +1411,13 @@ async def get_cattle_maternal_drill(
 ):
     async def build_detail(tag: str) -> DrillDetailRecord | None:
         info = await session.execute(
-            text("SELECT name, tag_number, date_of_birth, gender FROM cattle_data WHERE tag_number = :t"),
+            text("SELECT name, tag_number, date_of_birth, gender, new_is_currently_present, milk_remarks FROM cattle_data WHERE tag_number = :t"),
             {"t": tag},
         )
         row = info.fetchone()
         if not row:
             return None
-        name, tnum, dob, gender = row[0], row[1], row[2], row[3]
+        name, tnum, dob, gender, is_present_val, milk_remarks_val = row[0], row[1], row[2], row[3], row[4], row[5]
         avg_res = await session.execute(
             text("SELECT ROUND(AVG(milk)::numeric, 1) FROM cattle_milk_logs WHERE tag_number = :t"),
             {"t": tnum},
@@ -1383,7 +1459,9 @@ async def get_cattle_maternal_drill(
             tag_number=tnum,
             date_of_birth=str(dob) if dob else None,
             gender=gender,
+            is_present=int(is_present_val) if is_present_val is not None else None,
             average_milk=avg_val,
+            milk_remarks=milk_remarks_val,
             physical_mark=pm,
             physical_total=total,
         )
@@ -1407,7 +1485,6 @@ async def get_cattle_maternal_drill(
             text("""
                 SELECT tag_number FROM cattle_data
                 WHERE mother_tag_number = :mt AND tag_number != :self
-                  AND new_is_currently_present = 1
                 ORDER BY tag_number
             """),
             {"mt": mother_tag, "self": tag_number},
@@ -1432,7 +1509,6 @@ async def get_cattle_maternal_drill(
                 text("""
                     SELECT tag_number FROM cattle_data
                     WHERE mother_tag_number = :gm AND tag_number != :mt
-                      AND new_is_currently_present = 1
                     ORDER BY tag_number
                 """),
                 {"gm": gm_tag, "mt": mother_tag},
@@ -1442,12 +1518,50 @@ async def get_cattle_maternal_drill(
                 if ad:
                     maternal_aunts.append(ad)
 
+    # Father and paternal lineage
+    father_tag_res = await session.execute(text("SELECT father_tag_number FROM cattle_data WHERE tag_number = :t"), {"t": tag_number})
+    father_tag = father_tag_res.scalar()
+    father_tag = str(father_tag).strip() if father_tag and str(father_tag).strip() else None
+    father = await build_detail(father_tag) if father_tag else None
+    if not father and father_tag:
+        fname_res = await session.execute(text("SELECT father_name FROM cattle_data WHERE tag_number = :t"), {"t": tag_number})
+        fname = fname_res.scalar()
+        father = DrillDetailRecord(name=fname or father_tag, tag_number=father_tag, date_of_birth=None, gender="Male", average_milk=None, physical_mark=None, physical_total=None)
+
+    paternal_grandmother = None
+    paternal_aunts: list[DrillDetailRecord] = []
+    if father_tag:
+        pgm_res = await session.execute(text("SELECT mother_tag_number FROM cattle_data WHERE tag_number = :ft"), {"ft": father_tag})
+        pgm_tag = pgm_res.scalar()
+        pgm_tag = str(pgm_tag).strip() if pgm_tag and str(pgm_tag).strip() else None
+        if pgm_tag:
+            paternal_grandmother = await build_detail(pgm_tag)
+            pa_res = await session.execute(text("SELECT tag_number FROM cattle_data WHERE mother_tag_number = :gm AND tag_number != :ft ORDER BY tag_number"), {"gm": pgm_tag, "ft": father_tag})
+            for r in pa_res.fetchall():
+                ad = await build_detail(r[0])
+                if ad:
+                    paternal_aunts.append(ad)
+
+    # Children - if male show via father, else via mother
+    children: list[DrillDetailRecord] = []
+    is_male = cattle.gender and str(cattle.gender).lower() == "male"
+    child_col = "father_tag_number" if is_male else "mother_tag_number"
+    child_res = await session.execute(text(f"SELECT tag_number FROM cattle_data WHERE {child_col} = :t ORDER BY tag_number"), {"t": tag_number})
+    for r in child_res.fetchall():
+        cd = await build_detail(r[0])
+        if cd:
+            children.append(cd)
+
     return CattleDrillDetailResponse(
         cattle=cattle,
         mother=mother,
+        father=father,
         sisters=sisters,
         maternal_grandmother=maternal_grandmother,
         maternal_aunts=maternal_aunts,
+        paternal_grandmother=paternal_grandmother,
+        paternal_aunts=paternal_aunts,
+        children=children,
     )
 
 
@@ -1830,6 +1944,11 @@ async def get_cattle_card(
                             r = fr.fetchone()
                             if r:
                                 family["father"] = {"name": r[0], "tag_number": r[1], "generation": None}
+                    try:
+                        mrk = await session.execute(text("SELECT milk_remarks FROM cattle_data WHERE tag_number = :tag"), {"tag": tag_number})
+                        overview["milk_remarks"] = mrk.scalar()
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"Patch father/mother failed for {tag_number}: {e}")
         return card_data
@@ -1841,7 +1960,7 @@ async def get_cattle_card(
             SELECT name, tag_number, acquisition_type, date_of_birth, animal_type,
                    mother_name, mother_tag_number, father_name, father_tag_number,
                    new_is_currently_present, new_is_currently_pregnant, new_is_currenlty_milking,
-                   weight_at_birth, gender
+                   weight_at_birth, gender, milk_remarks
             FROM cattle_data WHERE tag_number = :tag
         """),
         {"tag": tag_number},
@@ -1850,7 +1969,7 @@ async def get_cattle_card(
     if row is None:
         raise HTTPException(status_code=404, detail="Cattle not found")
 
-    name, tag, acq, dob, animal, mname, mtag, fname, ftag, present, pregnant, milking, weight, gender = row
+    name, tag, acq, dob, animal, mname, mtag, fname, ftag, present, pregnant, milking, weight, gender, milk_remarks_val = row
     return {
         "overview": {
             "name": name,
@@ -1874,6 +1993,7 @@ async def get_cattle_card(
             "animal_type": animal,
             "mother_tag_number": mtag,
             "father_tag_number": ftag,
+            "milk_remarks": milk_remarks_val,
         },
         "milk_by_month": [],
         "milk_by_day_only_for_month": [],
