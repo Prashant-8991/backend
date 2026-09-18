@@ -235,7 +235,7 @@ begin
                     FROM
                         cattle_lineage AS cl
                         INNER JOIN (
-                            -- Your top 10 scoring subquery
+                            -- Your top 10 scoring subquery - deduplicated latest per tag
                             SELECT
                                 tag_number,
                                 hip_width,
@@ -259,7 +259,7 @@ begin
                                     )
                                 ) AS total_score
                             FROM
-                                cattle_physical_logs
+                                (SELECT DISTINCT ON (tag_number) tag_number, hip_width, head, ear, eye, muzzle, horn, skin, tail, hump, udder, teat, dewlap, milk_vein FROM cattle_physical_logs ORDER BY tag_number, id DESC) latest
                             ORDER BY
                                 total_score DESC
                             LIMIT
@@ -310,17 +310,17 @@ begin
 end;
 $$ language plpgsql;
 
-drop FUNCTION get_dashboard_data;
+-- drop FUNCTION get_dashboard_data;
 
-select
-    *
-from
-    get_dashboard_data ();
+-- select
+--     *
+-- from
+--     get_dashboard_data ();
 
-select
-    *
-from
-    get_dashboard_data ();
+-- select
+--     *
+-- from
+--     get_dashboard_data ();
 
 -- drop function get_dashboard_data();
 -- ############################ cattle nested tree function #########################
