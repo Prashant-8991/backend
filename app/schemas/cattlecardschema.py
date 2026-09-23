@@ -60,6 +60,9 @@ class CattleCardOverview(BaseModel):
     weight: str | None = None
     age: str | None = None
     average_milk_per_day: float | None = None
+    milk_remarks: str | None = None
+    suggestion: str | None = None
+    final_observation: str | None = None
 
 
 class MilkRecord(BaseModel):

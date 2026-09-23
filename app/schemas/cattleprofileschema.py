@@ -165,6 +165,7 @@ class DrillDetailRecord(BaseModel):
     is_present: int | None = None
     average_milk: float | None = None
     milk_remarks: str | None = None
+    suggestion: str | None = None
     physical_mark: PhysicalMark | None = None
     physical_total: float | None = None
 

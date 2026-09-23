@@ -1728,11 +1728,11 @@ async def get_bull_children(
         return {"bull_tag_number": bull_tag, "bull_name": bull_name, "mode": mode, "count": 0, "children": []}
 
     async def build_detail(tag: str):
-        info = await session.execute(text("SELECT name, tag_number, date_of_birth, gender FROM cattle_data WHERE tag_number = :t"), {"t": tag})
+        info = await session.execute(text("SELECT name, tag_number, date_of_birth, gender, new_is_currently_present, milk_remarks, suggestion FROM cattle_data WHERE tag_number = :t"), {"t": tag})
         row = info.fetchone()
         if not row:
             return None
-        name, tnum, dob, gender = row[0], row[1], row[2], row[3]
+        name, tnum, dob, gender, is_present_val, milk_remarks_val, suggestion_val = row[0], row[1], row[2], row[3], row[4], row[5], row[6]
         avg_res = await session.execute(text("SELECT ROUND(AVG(milk)::numeric, 1) FROM cattle_milk_logs WHERE tag_number = :t"), {"t": tnum})
         avg_milk = avg_res.scalar()
         avg_val = float(avg_milk) if avg_milk is not None else None
@@ -1760,7 +1760,7 @@ async def get_bull_children(
                 "dewlap": float(prow[11]) if prow[11] is not None else None,
                 "milk_vein": float(prow[12]) if prow[12] is not None else None,
             }
-        return {"name": name, "tag_number": tnum, "date_of_birth": str(dob) if dob else None, "gender": gender, "average_milk": avg_val, "physical_mark": pm, "physical_total": total}
+        return {"name": name, "tag_number": tnum, "date_of_birth": str(dob) if dob else None, "gender": gender, "is_present": int(is_present_val) if is_present_val is not None else None, "milk_remarks": milk_remarks_val, "suggestion": suggestion_val, "average_milk": avg_val, "physical_mark": pm, "physical_total": total}
 
     crows = await session.execute(text("SELECT tag_number FROM cattle_data WHERE father_tag_number = :bt ORDER BY tag_number"), {"bt": bull_tag})
     children = []
@@ -1791,13 +1791,13 @@ async def get_cattle_maternal_drill(
 ):
     async def build_detail(tag: str) -> DrillDetailRecord | None:
         info = await session.execute(
-            text("SELECT name, tag_number, date_of_birth, gender, new_is_currently_present, milk_remarks FROM cattle_data WHERE tag_number = :t"),
+            text("SELECT name, tag_number, date_of_birth, gender, new_is_currently_present, milk_remarks, suggestion FROM cattle_data WHERE tag_number = :t"),
             {"t": tag},
         )
         row = info.fetchone()
         if not row:
             return None
-        name, tnum, dob, gender, is_present_val, milk_remarks_val = row[0], row[1], row[2], row[3], row[4], row[5]
+        name, tnum, dob, gender, is_present_val, milk_remarks_val, suggestion_val = row[0], row[1], row[2], row[3], row[4], row[5], row[6]
         avg_res = await session.execute(
             text("SELECT ROUND(AVG(milk)::numeric, 1) FROM cattle_milk_logs WHERE tag_number = :t"),
             {"t": tnum},
@@ -1842,6 +1842,7 @@ async def get_cattle_maternal_drill(
             is_present=int(is_present_val) if is_present_val is not None else None,
             average_milk=avg_val,
             milk_remarks=milk_remarks_val,
+            suggestion=suggestion_val,
             physical_mark=pm,
             physical_total=total,
         )
@@ -2006,22 +2007,7 @@ async def all_present_cattle(is_present: int | None = None):
     except Exception:
         pass
 
-    # For default present view, try to use the DB function (fast + cached)
-    if is_present == 1:
-        try:
-            async for session in get_session():
-                result = await session.execute(text("SELECT * FROM get_all_present_cattle();"))
-                cattle_list = result.scalar_one_or_none()
-                if cattle_list is not None:
-                    try:
-                        r.setex(cache_key, 30, json.dumps(cattle_list))
-                    except Exception:
-                        pass
-                    return cattle_list
-        except Exception as e:
-            print(f"get_all_present_cattle fallback due to: {e}")
-
-    # Fallback / Not Present / All: direct query
+    # Direct query (includes suggestion so the UI can highlight disposal cases)
     async for session in get_session():
         if is_present is None:
             where = "1=1"
@@ -2033,7 +2019,8 @@ async def all_present_cattle(is_present: int | None = None):
             text(f"""
                 SELECT tag_number, name, gender, acquisition_type, animal_type,
                        new_is_currenlty_milking as is_milking,
-                       new_is_currently_pregnant as is_pregnant
+                       new_is_currently_pregnant as is_pregnant,
+                       suggestion
                 FROM cattle_data
                 WHERE {where}
                 ORDER BY tag_number
@@ -2042,7 +2029,7 @@ async def all_present_cattle(is_present: int | None = None):
         )
         rows = result.fetchall()
         cattle_list = [
-            {"tag_number": r[0], "name": r[1], "gender": r[2], "acquisition_type": r[3], "animal_type": r[4], "is_milking": r[5], "is_pregnant": r[6]}
+            {"tag_number": r[0], "name": r[1], "gender": r[2], "acquisition_type": r[3], "animal_type": r[4], "is_milking": r[5], "is_pregnant": r[6], "suggestion": r[7]}
             for r in rows
         ]
         try:
@@ -2054,9 +2041,23 @@ async def all_present_cattle(is_present: int | None = None):
 
 @app.get("/all-milking-cattle", response_model=List[PresentCattleModel])
 async def get_milking_cattle(session: AsyncSession = Depends(get_session)):
-    result = await session.execute(text("select * from get_all_milking_cattle();"))
-    milking_cattle = result.scalar_one_or_none()
-    return milking_cattle
+    # Direct query (includes suggestion so disposal cases can be highlighted)
+    result = await session.execute(
+        text("""
+            SELECT tag_number, name, gender, acquisition_type, animal_type,
+                   new_is_currenlty_milking as is_milking,
+                   new_is_currently_pregnant as is_pregnant,
+                   suggestion
+            FROM cattle_data
+            WHERE new_is_currenlty_milking = 1
+            ORDER BY tag_number
+        """)
+    )
+    rows = result.fetchall()
+    return [
+        {"tag_number": r[0], "name": r[1], "gender": r[2], "acquisition_type": r[3], "animal_type": r[4], "is_milking": r[5], "is_pregnant": r[6], "suggestion": r[7]}
+        for r in rows
+    ]
 
 
 @app.get("/genealogy/all", response_model=List[GenealogyCattle])
@@ -2957,6 +2958,19 @@ async def get_cattle_card(
                             r = fr.fetchone()
                             if r:
                                 family["father"] = {"name": r[0], "tag_number": r[1], "generation": None}
+                    # Patch remarks / observations so they always reach the UI
+                    try:
+                        rem = await session.execute(
+                            text("SELECT milk_remarks, suggestion, final_observation FROM cattle_data WHERE tag_number = :tag"),
+                            {"tag": tag_number},
+                        )
+                        rrow = rem.fetchone()
+                        if rrow:
+                            overview["milk_remarks"] = rrow[0]
+                            overview["suggestion"] = rrow[1]
+                            overview["final_observation"] = rrow[2]
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"Patch father/mother failed for {tag_number}: {e}")
         return card_data
@@ -2968,7 +2982,7 @@ async def get_cattle_card(
             SELECT name, tag_number, acquisition_type, date_of_birth, animal_type,
                    mother_name, mother_tag_number, father_name, father_tag_number,
                    new_is_currently_present, new_is_currently_pregnant, new_is_currenlty_milking,
-                   weight_at_birth, gender
+                   weight_at_birth, gender, milk_remarks, suggestion, final_observation
             FROM cattle_data WHERE tag_number = :tag
         """),
         {"tag": tag_number},
@@ -2977,7 +2991,7 @@ async def get_cattle_card(
     if row is None:
         raise HTTPException(status_code=404, detail="Cattle not found")
 
-    name, tag, acq, dob, animal, mname, mtag, fname, ftag, present, pregnant, milking, weight, gender = row
+    name, tag, acq, dob, animal, mname, mtag, fname, ftag, present, pregnant, milking, weight, gender, milk_remarks_v, suggestion_v, final_observation_v = row
     return {
         "overview": {
             "name": name,
@@ -3001,6 +3015,9 @@ async def get_cattle_card(
             "animal_type": animal,
             "mother_tag_number": mtag,
             "father_tag_number": ftag,
+            "milk_remarks": milk_remarks_v,
+            "suggestion": suggestion_v,
+            "final_observation": final_observation_v,
         },
         "milk_by_month": [],
         "milk_by_day_only_for_month": [],

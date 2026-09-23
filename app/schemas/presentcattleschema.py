@@ -9,3 +9,4 @@ class PresentCattleModel(BaseModel):
     animal_type: str | None
     is_milking: int | None = None
     is_pregnant: int | None = None
+    suggestion: str | None = None
