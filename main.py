@@ -55,7 +55,7 @@ from app.schemas.cattleprofileschema import (
 )
 from app.schemas.presentcattleschema import PresentCattleModel
 from app.schemas.genealogyschema import GenealogyCattle
-from app.schemas.donatedoutschema import DonatedCattleRecord
+from app.schemas.donatedoutschema import DonatedCattleRecord, CattleDonationsResponse
 from app.schemas.cattlecardschema import CattleCardResponse
 from app.schemas.authschema import (
     GoogleLoginRequest,
@@ -74,6 +74,7 @@ from typing import List
 from fastapi.staticfiles import StaticFiles
 import redis
 import json
+import logging
 
 # Load .env from the backend directory regardless of where the app is started
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -2223,6 +2224,58 @@ async def get_donated_out(session: AsyncSession = Depends(get_session)):
 
         # r.setex("donated_out", 3600 * 24 * 365, json.dumps(dedup))
         return dedup
+
+
+@app.get("/cattle/{tag_number}/donations", response_model=CattleDonationsResponse)
+async def get_cattle_donations(
+    tag_number: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Donation in/out history for a single cattle tag.
+
+    - donated_in: where the cattle came from
+    - donated_out: where the cattle went (used when it is no longer present)
+    """
+    donated_in: list[dict] = []
+    donated_out: list[dict] = []
+
+    try:
+        in_res = await session.execute(
+            text("""
+                SELECT name, tag_number, donated_in_date::text, from_donated_in, gender
+                FROM donated_in
+                WHERE tag_number = :t
+                ORDER BY donated_in_date DESC NULLS LAST
+            """),
+            {"t": tag_number},
+        )
+        donated_in = [
+            {"name": r[0], "tag_number": r[1], "donated_date": r[2], "from_donated_in": r[3], "gender": r[4]}
+            for r in in_res.fetchall()
+        ]
+    except Exception as e:
+        await session.rollback()
+        logging.getLogger("donations").warning("donated_in lookup failed for %s: %s", tag_number, e)
+
+    try:
+        out_res = await session.execute(
+            text("""
+                SELECT name, tag_number, donated_out_date::text, donated_to, mobile_number, gender
+                FROM donated_out
+                WHERE tag_number = :t
+                ORDER BY donated_out_date DESC NULLS LAST
+            """),
+            {"t": tag_number},
+        )
+        donated_out = [
+            {"name": r[0], "tag_number": r[1], "donated_date": r[2], "donated_to": r[3], "mobile_number": r[4], "gender": r[5]}
+            for r in out_res.fetchall()
+        ]
+    except Exception as e:
+        await session.rollback()
+        logging.getLogger("donations").warning("donated_out lookup failed for %s: %s", tag_number, e)
+
+    return {"tag_number": tag_number, "donated_in": donated_in, "donated_out": donated_out}
 
 
 @app.get("/report", response_model=ReportResponse)
