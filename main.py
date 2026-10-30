@@ -653,6 +653,67 @@ async def top_milkers_current_month(session: AsyncSession = Depends(get_session)
     ]
 
 
+@app.get("/dashboard/milking-current-month", response_model=list[TopCurrentMonthMilker])
+async def milking_current_month(session: AsyncSession = Depends(get_session)):
+    """All milking cows for the current calendar month with milk totals (no limit)."""
+    result = await session.execute(
+        text("""
+            SELECT
+                cd.tag_number,
+                cd.name,
+                ROUND(SUM(cml.milk)::numeric, 1) AS total_milk,
+                ROUND(AVG(cml.milk)::numeric, 1) AS avg_milk,
+                COUNT(*) AS days_logged,
+                cd.gender,
+                cd.animal_type
+            FROM cattle_milk_logs cml
+            JOIN cattle_data cd ON cd.tag_number = cml.tag_number
+            WHERE cml.date >= date_trunc('month', CURRENT_DATE)
+              AND cml.date < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
+            GROUP BY cd.tag_number, cd.name, cd.gender, cd.animal_type
+            ORDER BY total_milk DESC
+        """)
+    )
+    rows = result.fetchall()
+    return [
+        TopCurrentMonthMilker(
+            tag_number=row[0], name=row[1], total_milk=float(row[2] or 0),
+            avg_milk=float(row[3]) if row[3] is not None else None,
+            days_logged=row[4], gender=row[5], animal_type=row[6],
+        )
+        for row in rows
+    ]
+
+
+@app.get("/dashboard/milk-daily-current-month")
+async def milk_daily_current_month(session: AsyncSession = Depends(get_session)):
+    """Every milk log (per cow, per day) for the current calendar month."""
+    result = await session.execute(
+        text("""
+            SELECT
+                cml.tag_number,
+                cd.name,
+                cml.date::text AS log_date,
+                cml.milk
+            FROM cattle_milk_logs cml
+            JOIN cattle_data cd ON cd.tag_number = cml.tag_number
+            WHERE cml.date >= date_trunc('month', CURRENT_DATE)
+              AND cml.date < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
+            ORDER BY cd.name NULLS LAST, cml.tag_number, cml.date
+        """)
+    )
+    rows = result.fetchall()
+    return [
+        {
+            "tag_number": r[0],
+            "name": r[1],
+            "date": r[2],
+            "milk": float(r[3] or 0),
+        }
+        for r in rows
+    ]
+
+
 @app.get("/dashboard/bottom-milkers-current-month", response_model=list[BottomCurrentMonthMilker])
 async def bottom_milkers_current_month(session: AsyncSession = Depends(get_session)):
     """Bottom 10 milking cows for the current calendar month (lowest total milk)."""
@@ -2295,8 +2356,10 @@ async def get_report(session: AsyncSession = Depends(get_session)):
     ]
     # Add computed physical_score column (sum of all numeric traits excluding id, tag_number, hip_width)
     columns.append(ReportColumn(name="physical_score", type="numeric"))
+    # Add suggestion so the UI can derive the "Attention" column
+    columns.append(ReportColumn(name="suggestion", type="text"))
 
-    # Get all data from the view + latest physical_score per tag
+    # Get all data from the view + latest physical_score + suggestion per tag
     data_result = await session.execute(
         text("""
             WITH latest_physical AS (
@@ -2305,9 +2368,10 @@ async def get_report(session: AsyncSession = Depends(get_session)):
                 FROM cattle_physical_logs
                 ORDER BY tag_number, id DESC
             )
-            SELECT v.*, lp.physical_score
+            SELECT v.*, lp.physical_score, cd.suggestion
             FROM cattle_data_view v
             LEFT JOIN latest_physical lp ON lp.tag_number = v.tag_number
+            LEFT JOIN cattle_data cd ON cd.tag_number = v.tag_number
             ORDER BY v.tag_number
         """)
     )
